@@ -60,9 +60,14 @@ function Wait-App([int]$PreviousId = 0) {
 }
 
 function Close-App($AppProcess) {
-    if (-not $AppProcess.HasExited -and
-        (-not $AppProcess.CloseMainWindow() -or -not $AppProcess.WaitForExit(10000))) {
-        throw 'The Filehelm window did not close.'
+    if ($AppProcess.HasExited) { return }
+    $window = $AppProcess.MainWindowHandle
+    if (-not [FilehelmSmokeWindow]::PostMessageW($window, 0x0010, 0, 0) -and -not $AppProcess.HasExited) {
+        $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "Could not send WM_CLOSE to Filehelm process $($AppProcess.Id) (Win32 error $errorCode)."
+    }
+    if (-not $AppProcess.WaitForExit(10000)) {
+        throw "Filehelm process $($AppProcess.Id) did not exit after WM_CLOSE."
     }
 }
 
@@ -93,6 +98,16 @@ function Invoke-AppUpdate {
 }
 
 if ($AppUpdate -and -not $PreviousMsi) { throw 'AppUpdate requires a previous MSI that contains the update helper.' }
+if ($AppUpdate -and -not ('FilehelmSmokeWindow' -as [type])) {
+    Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class FilehelmSmokeWindow {
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool PostMessageW(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
+}
+'@
+}
 $userData = Get-UserDataState
 $cleanup = @()
 try {
