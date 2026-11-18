@@ -30,6 +30,7 @@ impl Anchors {
 #[derive(Clone)]
 pub struct Location {
     pub path: PathBuf,
+    pub archive: Option<Arc<str>>,
     pub query: Vec<u16>,
     pub anchors: Anchors,
 }
@@ -38,12 +39,25 @@ impl Location {
     pub fn new(path: PathBuf) -> Self {
         Self {
             path,
+            archive: None,
             query: Vec::new(),
             anchors: Anchors::default(),
         }
     }
 
+    pub fn archive(path: PathBuf, folder: Arc<str>) -> Self {
+        Self {
+            archive: Some(folder),
+            ..Self::new(path)
+        }
+    }
+
     pub fn title(&self) -> &OsStr {
+        if let Some(folder) = &self.archive
+            && !folder.is_empty()
+        {
+            return OsStr::new(folder.rsplit('/').next().unwrap());
+        }
         if let Some(name) = self.path.file_name() {
             return name;
         }

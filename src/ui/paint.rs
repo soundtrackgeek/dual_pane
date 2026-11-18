@@ -417,6 +417,14 @@ impl App {
                 (_, true) => "Right pane  ·  Active",
                 (_, false) => "Right pane",
             };
+            let in_zip = self.panes[index].listing.borrow().archive.is_some();
+            let zip_heading;
+            let heading = if in_zip {
+                zip_heading = format!("{heading}  ·  ZIP");
+                zip_heading.as_str()
+            } else {
+                heading
+            };
             label(
                 dc,
                 inset(label_area, s(9), 0),
@@ -471,9 +479,17 @@ impl App {
             let selected = pane.count();
             let noun = if shown == 1 { "item" } else { "items" };
             let status = if let Some(error) = &listing.error {
-                format!("Could not open folder · {error}")
+                if in_zip {
+                    format!("Could not open ZIP folder · {error}")
+                } else {
+                    format!("Could not open folder · {error}")
+                }
             } else if listing.loading && !listing.complete && shown == 0 {
-                "Loading folder…".to_owned()
+                if in_zip {
+                    "Reading ZIP directory…".to_owned()
+                } else {
+                    "Loading folder…".to_owned()
+                }
             } else if listing.loading && !listing.complete {
                 format!("{count} shown · Loading…")
             } else if listing.projecting {
@@ -487,7 +503,11 @@ impl App {
                 if selected != 0 {
                     status.push_str(&format!(" · {} selected", grouped(selected as u64)));
                 }
-                if listing.watch == WatchState::Unavailable {
+                if let Some(archive) = &listing.archive_index
+                    && archive.omitted > 0
+                {
+                    status.push_str(&format!(" · {} omitted", grouped(archive.omitted as u64)));
+                } else if listing.watch == WatchState::Unavailable {
                     status.push_str(" · Ctrl+R to refresh");
                 }
                 status

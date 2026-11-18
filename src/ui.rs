@@ -41,6 +41,7 @@ use crate::{
     watch::{Notice, Rename, Watcher},
 };
 
+mod archives;
 mod batch_rename;
 mod comparison;
 mod find_files;
@@ -133,6 +134,8 @@ type BatchNames = Arc<HashMap<Vec<u16>, Vec<u16>>>;
 #[derive(Default)]
 struct Listing {
     path: PathBuf,
+    archive: Option<Arc<str>>,
+    archive_index: Option<Arc<crate::archive::Index>>,
     location: usize,
     request: usize,
     view_request: usize,
@@ -164,6 +167,10 @@ struct Listing {
 impl Listing {
     fn ready(&self) -> bool {
         self.complete && !self.projecting && self.error.is_none()
+    }
+
+    fn disk_ready(&self) -> bool {
+        self.archive.is_none() && self.ready()
     }
 }
 
@@ -202,6 +209,7 @@ struct App {
     window: HWND,
     panes: [Pane; 2],
     copy: HWND,
+    archive_copy_label: Cell<bool>,
     move_: HWND,
     rename: HWND,
     create: HWND,
@@ -657,6 +665,7 @@ impl App {
             window,
             panes,
             copy,
+            archive_copy_label: Cell::new(false),
             move_,
             rename,
             create,
@@ -712,19 +721,29 @@ impl App {
         let source = self.active.get();
         let destination = self.panes[1 - source].listing.borrow();
         let origin = self.panes[source].listing.borrow();
-        let ready = !self.operation_active.get() && origin.ready();
+        let ready = !self.operation_active.get() && origin.disk_ready();
+        let in_archive = origin.archive.is_some();
         let selected = self.panes[source].count();
         let enabled = origin.ready()
             && self.can_queue_transfer()
             && destination.complete
             && destination.error.is_none()
+            && destination.archive.is_none()
             && origin.path != destination.path
             && selected > 0;
         drop(origin);
         drop(destination);
         unsafe {
             let _ = EnableWindow(self.copy, enabled);
-            let _ = EnableWindow(self.move_, enabled);
+            let _ = EnableWindow(self.move_, enabled && !in_archive);
+            let copy = if in_archive {
+                w!("F5 Extract")
+            } else {
+                w!("F5   Copy")
+            };
+            if self.archive_copy_label.replace(in_archive) != in_archive {
+                let _ = SetWindowTextW(self.copy, copy);
+            }
             let _ = EnableWindow(self.rename, ready && selected == 1);
             let _ = EnableWindow(self.create, ready);
             let _ = EnableWindow(self.recycle, ready && selected > 0);
@@ -770,7 +789,7 @@ impl App {
                 return;
             }
         };
-        if pane.listing.borrow().path == path {
+        if pane.listing.borrow().archive.is_none() && pane.listing.borrow().path == path {
             self.refresh(index);
             return;
         }
@@ -786,18 +805,25 @@ impl App {
         let pane = &self.panes[index];
         let Location {
             path,
+            archive,
             query,
             anchors,
         } = place;
         let filter_text = wide(OsString::from_wide(&query));
         self.kill_timer(SCAN_TIMER + index);
         self.kill_timer(REFRESH_TIMER + index);
-        let (location, initial) = {
+        let (location, initial, cached, request) = {
             let mut listing = pane.listing.borrow_mut();
             let request = listing.request.wrapping_add(1);
-            let initial = pane.scanner.prepare_initial(request, path.clone());
+            let cached = (archive.is_some() && listing.path == path)
+                .then(|| listing.archive_index.take())
+                .flatten();
+            let initial = archive
+                .is_none()
+                .then(|| pane.scanner.prepare_initial(request, path.clone()));
             *listing = Listing {
                 path: path.clone(),
+                archive: archive.clone(),
                 location: listing.location.wrapping_add(1),
                 request,
                 view_request: listing.view_request.wrapping_add(1),
@@ -805,25 +831,34 @@ impl App {
                 query,
                 restore: (!anchors.is_empty()).then_some(anchors),
                 loading: true,
-                initial: Some(initial.clone()),
+                initial: initial.clone(),
                 ..Listing::default()
             };
             pane.scanner.cancel_view(listing.view_request);
-            (listing.location, initial)
+            (listing.location, initial, cached, request)
         };
         self.changing_rows.set(true);
         send(pane.list, LVM_SETITEMCOUNT, 0, 0);
         self.changing_rows.set(false);
-        show_path(pane.path, &path);
+        self.show_pane_path(index);
         unsafe {
             let _ = SetWindowTextW(pane.filter, PCWSTR(filter_text.as_ptr()));
-            let _ = EnableWindow(pane.up, parent_of(&path).is_some());
+            let _ = EnableWindow(pane.up, archive.is_some() || parent_of(&path).is_some());
         }
-        pane.watcher.watch(location, path, Some(initial));
-        // Give the watch a chance to arm before enumerating. A slow or unsupported
-        // watch never gets to hold up directory browsing.
-        if !self.timer(SCAN_TIMER + index, 75) {
-            self.start_initial_scan(index);
+        if let Some(initial) = initial {
+            pane.watcher.watch(location, path, Some(initial));
+            // Give the watch a chance to arm before enumerating. A slow or unsupported
+            // watch never gets to hold up directory browsing.
+            if !self.timer(SCAN_TIMER + index, 75) {
+                self.start_initial_scan(index);
+            }
+        } else {
+            pane.watcher.suspend();
+            let to_read = cached.is_none().then_some(path);
+            pane.scanner.open_archive(request, to_read);
+            if let Some(cached) = cached {
+                self.finish_archive(index, request, Ok(cached));
+            }
         }
         self.status_changed();
         self.update_quick_view_navigation();
@@ -925,6 +960,10 @@ impl App {
         self.status_changed();
     }
     fn parent(&self, index: usize) {
+        if self.archive_parent(index) {
+            self.focus_list(index);
+            return;
+        }
         let parent = parent_of(&self.panes[index].listing.borrow().path);
         if let Some(parent) = parent {
             self.navigate(index, parent);
@@ -935,6 +974,18 @@ impl App {
     fn refresh(&self, index: usize) {
         let pane = &self.panes[index];
         let mut listing = pane.listing.borrow_mut();
+        if listing.archive.is_some() {
+            listing.request = listing.request.wrapping_add(1);
+            listing.loading = true;
+            listing.complete = false;
+            listing.error = None;
+            listing.archive_index = None;
+            pane.scanner
+                .open_archive(listing.request, Some(listing.path.clone()));
+            drop(listing);
+            self.status_changed();
+            return;
+        }
         if listing.initial.is_some() {
             drop(listing);
             self.start_initial_scan(index);
@@ -951,6 +1002,9 @@ impl App {
     fn open_row(&self, index: usize, row: isize) {
         let pane = &self.panes[index];
         if pane.listing.borrow().projecting {
+            return;
+        }
+        if self.open_archive_row(index, row) {
             return;
         }
         if let Some((path, directory)) = pane.item(row) {
@@ -1260,11 +1314,17 @@ impl App {
         }
         let destination = {
             let target = self.panes[1 - index].listing.borrow();
-            if !target.complete || target.error.is_some() {
+            if !target.complete || target.error.is_some() || target.archive.is_some() {
                 return;
             }
             target.path.clone()
         };
+        if pane.listing.borrow().archive.is_some() {
+            if matches!(action, Transfer::Copy) {
+                self.extract_selection(index, destination);
+            }
+            return;
+        }
         let (folder, sources) = {
             let listing = pane.listing.borrow();
             let sources = pane
@@ -1302,7 +1362,7 @@ impl App {
     fn rename(&self) {
         let index = self.active.get();
         let pane = &self.panes[index];
-        if self.operation_active.get() || !pane.listing.borrow().ready() || pane.count() != 1 {
+        if self.operation_active.get() || !pane.listing.borrow().disk_ready() || pane.count() != 1 {
             return;
         }
         let Some((source, directory)) = pane
@@ -1342,7 +1402,7 @@ impl App {
         let pane = &self.panes[index];
         let (folder, location, epoch) = {
             let listing = pane.listing.borrow();
-            if self.operation_active.get() || !listing.ready() {
+            if self.operation_active.get() || !listing.disk_ready() {
                 return;
             }
             (
@@ -1369,7 +1429,7 @@ impl App {
     fn recycle(&self) {
         let index = self.active.get();
         let pane = &self.panes[index];
-        if self.operation_active.get() || !pane.listing.borrow().ready() {
+        if self.operation_active.get() || !pane.listing.borrow().disk_ready() {
             return;
         }
         let (folder, sources) = pane.selected_paths();
@@ -1462,6 +1522,9 @@ impl App {
     fn events(&self) {
         while let Ok(event) = self.events.try_recv() {
             match event {
+                Event::Directory(Update::Archive { pane, id, index }) => {
+                    self.finish_archive(pane, id, index.map(Arc::new))
+                }
                 Event::Directory(Update::Directory {
                     pane,
                     id,
@@ -1601,13 +1664,12 @@ impl App {
             VK_RETURN if in_edit => {
                 let path = window_text(pane.path);
                 if !path.is_empty() {
-                    let base = pane.listing.borrow().path.clone();
-                    self.navigate(active, base.join(Path::new(&path)));
+                    self.navigate_path_field(active, Path::new(&path));
                     self.focus_list(active);
                 }
             }
             VK_ESCAPE if in_edit => {
-                show_path(pane.path, &pane.listing.borrow().path);
+                self.show_pane_path(active);
                 self.focus_list(active);
             }
             VK_ESCAPE if filtering => self.clear_filter(active),

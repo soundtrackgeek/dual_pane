@@ -4,6 +4,8 @@
 compile_error!("Dual Pane requires Windows.");
 
 #[cfg(windows)]
+mod archive;
+#[cfg(windows)]
 mod batch_rename;
 #[cfg(windows)]
 mod compare;

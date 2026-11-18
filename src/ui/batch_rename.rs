@@ -55,7 +55,7 @@ impl App {
         }
         let pane = &self.panes[self.active.get()];
         let listing = pane.listing.borrow();
-        if !listing.ready() || pane.count() == 0 {
+        if !listing.disk_ready() || pane.count() == 0 {
             drop(listing);
             message(
                 self.window,

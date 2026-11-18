@@ -135,10 +135,9 @@ impl App {
 
     pub(super) fn compare_folders(&self) {
         let [left, right] = self.panes.each_ref().map(|pane| pane.listing.borrow());
-        if [&left, &right]
-            .into_iter()
-            .any(|listing| !listing.complete || listing.error.is_some())
-        {
+        if [&left, &right].into_iter().any(|listing| {
+            listing.archive.is_some() || !listing.complete || listing.error.is_some()
+        }) {
             message(
                 self.window,
                 "Compare folders",

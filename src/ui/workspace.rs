@@ -121,7 +121,7 @@ impl Workspace {
             Theme::Light => "light",
             Theme::Dark => "dark",
         };
-        let mut data = wide("v2");
+        let mut data = wide("v3");
         data.extend(wide(theme));
         data.extend(wide(self.split.to_string()));
         // REG_MULTI_SZ uses an empty string as its terminator. Prefix each
@@ -139,6 +139,8 @@ impl Workspace {
                 write(&digits(sort));
                 let place = &tab.location;
                 write(&units(&place.path));
+                let archive = place.archive.as_ref().map(|folder| format!("z{folder}"));
+                write(&archive.as_ref().map_or_else(Vec::new, units));
                 write(&place.query);
                 write(&digits(place.anchors.top_index));
                 write(&place.anchors.top);
@@ -185,9 +187,13 @@ impl Workspace {
                     Vec::new(),
                 )
             }
-            "v2" => {
+            "v2" | "v3" => {
                 let mut read = || parts.next()?.strip_prefix(&[b'+' as u16]);
-                let panes = [decode_tabs(&mut read)?, decode_tabs(&mut read)?];
+                let archive = version == "v3";
+                let panes = [
+                    decode_tabs(&mut read, archive)?,
+                    decode_tabs(&mut read, archive)?,
+                ];
                 let count = number(read()?)?;
                 if count > MAX_PAIRS {
                     return None;
@@ -242,7 +248,7 @@ fn decode_sort(value: &[u16]) -> Option<Sort> {
     })
 }
 
-fn decode_tabs<'a>(read: &mut impl FnMut() -> Option<&'a [u16]>) -> Option<Tabs> {
+fn decode_tabs<'a>(read: &mut impl FnMut() -> Option<&'a [u16]>, archive: bool) -> Option<Tabs> {
     let count = number(read()?)?;
     let active = number(read()?)?;
     if count > MAX_TABS || active >= count {
@@ -252,6 +258,17 @@ fn decode_tabs<'a>(read: &mut impl FnMut() -> Option<&'a [u16]>) -> Option<Tabs>
     for _ in 0..count {
         let sort = decode_sort(read()?)?;
         let path = folder(read()?)?;
+        let mut archive_folder = None;
+        if archive {
+            let field = read()?;
+            if !field.is_empty() {
+                let folder = String::from_utf16(field.strip_prefix(&[b'z' as u16])?).ok()?;
+                if !crate::archive::valid_folder(&folder) {
+                    return None;
+                }
+                archive_folder = Some(Arc::from(folder));
+            }
+        }
         let query = read()?;
         let top_index = number(read()?)?;
         let [top, focused, selected] = [read()?, read()?, read()?];
@@ -270,6 +287,7 @@ fn decode_tabs<'a>(read: &mut impl FnMut() -> Option<&'a [u16]>) -> Option<Tabs>
         items.push(Tab::new(
             Location {
                 path,
+                archive: archive_folder,
                 query: query.to_vec(),
                 anchors,
             },
@@ -312,24 +330,74 @@ mod tests {
     }
 
     #[test]
+    fn reads_version_two_disk_tabs() {
+        let fields = [
+            "v2",
+            "system",
+            "0.5",
+            "+1",
+            "+0",
+            "+0",
+            r"+C:\Left",
+            "+",
+            "+0",
+            "+",
+            "+",
+            "+",
+            "+1",
+            "+0",
+            "+2",
+            r"+C:\Right",
+            "+",
+            "+0",
+            "+",
+            "+",
+            "+",
+            "+0",
+            "",
+        ];
+        let data = fields.into_iter().flat_map(wide).collect::<Vec<_>>();
+        let saved = Workspace::decode(&data).unwrap();
+        assert_eq!(
+            saved.panes[0].current().location.path,
+            Path::new(r"C:\Left")
+        );
+        assert_eq!(
+            saved.panes[1].current().location.path,
+            Path::new(r"C:\Right")
+        );
+        assert!(
+            saved
+                .panes
+                .iter()
+                .all(|pane| pane.current().location.archive.is_none())
+        );
+    }
+
+    #[test]
     fn restores_active_tabs_and_saved_pairs_with_unicode_and_empty_fields() {
         let mut workspace = Workspace::default();
         let folder = PathBuf::from(r"C:\År");
         workspace.panes[0] = Tabs::single(folder.clone(), Sort::default());
         assert!(workspace.panes[0].open());
         let tab = workspace.panes[0].current_mut();
-        tab.location.path = PathBuf::from(r"C:\日本語");
+        tab.location.path = PathBuf::from(r"C:\日本語.zip");
+        tab.location.archive = Some(Arc::from("写真/á"));
         tab.location.query = units("æ");
         tab.location.anchors.top = units("æ.txt");
         tab.location.anchors.top_index = 8;
         workspace.pairs.push(SavedPair {
             name: OsString::from("Å → 日本語"),
-            paths: [folder, tab.location.path.clone()],
+            paths: [folder, PathBuf::from(r"C:\日本語")],
         });
         let data = workspace.encode();
         let saved = Workspace::decode(&data).unwrap();
         assert_eq!(saved.panes[0].items.len(), 2);
         assert_eq!(saved.panes[0].active, 1);
+        assert_eq!(
+            saved.panes[0].current().location.archive.as_deref(),
+            Some("写真/á")
+        );
         assert_eq!(saved.panes[0].current().location.query, units("æ"));
         assert_eq!(
             saved.panes[0].current().location.anchors.top,

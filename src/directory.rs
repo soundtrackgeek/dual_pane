@@ -250,6 +250,7 @@ struct Scan {
     id: usize,
     directory: PathBuf,
     preview: bool,
+    archive: bool,
 }
 
 struct Projection {
@@ -301,6 +302,7 @@ impl InitialScan {
             id: self.id,
             directory: self.directory.clone(),
             preview: true,
+            archive: false,
         });
         self.queue.ready.notify_one();
         true
@@ -308,6 +310,11 @@ impl InitialScan {
 }
 
 pub enum Update {
+    Archive {
+        pane: usize,
+        id: usize,
+        index: std::io::Result<crate::archive::Index>,
+    },
     Directory {
         pane: usize,
         id: usize,
@@ -359,6 +366,17 @@ impl Scanner {
                             Job::Scan(request) => {
                                 let current =
                                     || queue.scan_id.load(Ordering::Relaxed) == request.id;
+                                if request.archive {
+                                    let index = crate::archive::index(&request.directory, current);
+                                    if current() {
+                                        deliver(Update::Archive {
+                                            pane,
+                                            id: request.id,
+                                            index,
+                                        });
+                                    }
+                                    continue;
+                                }
                                 let publish = |preview, entries| {
                                     if current() {
                                         deliver(Update::Directory {
@@ -417,8 +435,23 @@ impl Scanner {
             id,
             directory,
             preview: false,
+            archive: false,
         });
         self.0.ready.notify_one();
+    }
+
+    pub fn open_archive(&self, id: usize, path: Option<PathBuf>) {
+        let mut pending = self.0.pending.lock().unwrap();
+        self.0.scan_id.store(id, Ordering::Relaxed);
+        pending.scan = path.map(|directory| Scan {
+            id,
+            directory,
+            preview: false,
+            archive: true,
+        });
+        if pending.scan.is_some() {
+            self.0.ready.notify_one();
+        }
     }
 
     pub fn project(&self, id: usize, entries: Arc<Vec<Entry>>, sort: Sort, query: Vec<u16>) {
@@ -448,7 +481,7 @@ impl Drop for Scanner {
         self.0.ready.notify_all();
     }
 }
-fn sort(entries: &mut [Entry]) {
+pub(crate) fn sort(entries: &mut [Entry]) {
     entries.sort_unstable_by(|left, right| {
         right.directory.cmp(&left.directory).then_with(|| {
             let order =

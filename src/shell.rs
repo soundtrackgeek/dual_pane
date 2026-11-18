@@ -28,6 +28,7 @@ use crate::directory::wide;
 pub enum Transfer {
     Copy,
     Move,
+    Extract,
 }
 
 impl Transfer {
@@ -35,6 +36,7 @@ impl Transfer {
         match self {
             Self::Copy => "Copy",
             Self::Move => "Move",
+            Self::Extract => "Extract",
         }
     }
 }

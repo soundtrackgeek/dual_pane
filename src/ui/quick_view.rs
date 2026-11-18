@@ -55,7 +55,7 @@ impl QuickView {
 impl App {
     fn preview_item(&self, pane: usize, row: usize) -> Option<Item> {
         let listing = self.panes[pane].listing.borrow();
-        if listing.projecting {
+        if listing.projecting || listing.archive.is_some() {
             return None;
         }
         let entry = listing.rows.get(row)?;

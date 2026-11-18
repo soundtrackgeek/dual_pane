@@ -26,16 +26,17 @@ use windows::{
 };
 
 use crate::{
+    archive,
     compare::{self, Comparison, Identity, Plan, Stamp},
-    directory::{Entry, wide},
+    directory::{Entry, grouped, wide},
     shell::{self, Transfer},
 };
 
-#[derive(Clone, Copy)]
 enum Policy {
     Direct,
     Reviewed([Identity; 2]),
     Retry([Identity; 2]),
+    Extract(archive::Source),
 }
 
 pub struct Request {
@@ -71,6 +72,22 @@ impl Requested {
 }
 
 impl Request {
+    pub fn extract(paths: [PathBuf; 2], files: Vec<Requested>, source: archive::Source) -> Self {
+        Self {
+            action: Transfer::Extract,
+            paths,
+            files,
+            policy: Policy::Extract(source),
+        }
+    }
+
+    pub fn zip_folder(&self) -> Option<Arc<str>> {
+        if let Policy::Extract(source) = &self.policy {
+            Some(source.folder.clone())
+        } else {
+            None
+        }
+    }
     pub fn direct(action: Transfer, paths: [PathBuf; 2], files: Vec<Requested>) -> Self {
         Self {
             action,
@@ -155,6 +172,7 @@ pub enum ItemState {
     Pending,
     Copied,
     Moved,
+    Extracted,
     Skipped,
     Failed,
     Canceled,
@@ -168,6 +186,7 @@ impl ItemState {
             Self::Pending => "Pending",
             Self::Copied => "Copied",
             Self::Moved => "Moved",
+            Self::Extracted => "Extracted",
             Self::Skipped => "Skipped",
             Self::Failed => "Failed",
             Self::Canceled => "Canceled",
@@ -177,7 +196,7 @@ impl ItemState {
     }
 
     pub fn completed(self) -> bool {
-        matches!(self, Self::Copied | Self::Moved)
+        matches!(self, Self::Copied | Self::Moved | Self::Extracted)
     }
 }
 
@@ -376,6 +395,7 @@ fn classify(action: Transfer, code: HRESULT, destination: bool) -> ItemState {
         match action {
             Transfer::Copy => ItemState::Copied,
             Transfer::Move => ItemState::Moved,
+            Transfer::Extract => ItemState::Extracted,
         }
     } else if code.is_err() {
         ItemState::Failed
@@ -525,6 +545,9 @@ pub fn run(
     cancel: Arc<AtomicBool>,
     send: impl Fn(ProgressUpdate) + Send + 'static,
 ) -> Report {
+    if let Policy::Extract(source) = &request.policy {
+        return run_extract(request, source, &cancel, send);
+    }
     let tracker = Arc::new(Mutex::new(Tracker {
         action: request.action,
         paths: HashMap::new(),
@@ -575,6 +598,122 @@ pub fn run(
         .iter()
         .any(|row| row.state == ItemState::Unconfirmed);
     std::mem::replace(&mut tracker.report, Report::empty(0))
+}
+
+fn run_extract(
+    request: &Request,
+    source: &archive::Source,
+    cancel: &AtomicBool,
+    send: impl Fn(ProgressUpdate),
+) -> Report {
+    let current = || !cancel.load(Ordering::Relaxed);
+    let mut extractor = match archive::Extractor::prepare(
+        &request.paths[0],
+        source,
+        &request.paths[1],
+        request.files.iter().map(|file| file.name.as_os_str()),
+        current,
+    ) {
+        Ok(extractor) => extractor,
+        Err(error) => {
+            let state = if current() {
+                ItemState::NotStarted
+            } else {
+                ItemState::Canceled
+            };
+            return Report::stopped(request.files.len(), state, error.to_string());
+        }
+    };
+    let mut report = Report::stopped(request.files.len(), ItemState::NotStarted, String::new());
+    report.failed = false;
+    let total = extractor.total;
+    let mut bytes = 0_u128;
+    let mut complete = 0;
+    let mut last = Instant::now();
+    let mut changed = Vec::new();
+    send(ProgressUpdate {
+        summary: Progress {
+            complete,
+            percent: Some(0),
+        },
+        items: Vec::new(),
+    });
+    for (index, file) in request.files.iter().enumerate() {
+        if !current() {
+            report.aborted = true;
+            break;
+        }
+        let result = extractor.item(index, &file.name, current, |count| {
+            bytes += count as u128;
+            if last.elapsed() >= Duration::from_millis(100) {
+                let percent = (total > 0).then(|| (bytes * 100 / total).min(99) as u32);
+                send(ProgressUpdate {
+                    summary: Progress { complete, percent },
+                    items: std::mem::take(&mut changed),
+                });
+                last = Instant::now();
+            }
+        });
+        let (state, detail) = match result {
+            Ok(()) => {
+                complete += 1;
+                (ItemState::Extracted, None)
+            }
+            Err(error) if !current() || error.kind() == io::ErrorKind::Interrupted => {
+                report.aborted = true;
+                (
+                    ItemState::Canceled,
+                    Some("Extraction stopped before publishing this item.".into()),
+                )
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                (ItemState::Skipped, Some(error.to_string()))
+            }
+            Err(error) => {
+                report.failed = true;
+                (ItemState::Failed, Some(error.to_string()))
+            }
+        };
+        report.items[index] = ItemReport {
+            state,
+            detail,
+            retry_identity: None,
+        };
+        changed.push((index, state));
+        if last.elapsed() >= Duration::from_millis(100) || index + 1 == request.files.len() {
+            let percent = (total > 0).then(|| (bytes * 100 / total).min(99) as u32);
+            send(ProgressUpdate {
+                summary: Progress { complete, percent },
+                items: std::mem::take(&mut changed),
+            });
+            last = Instant::now();
+        }
+    }
+    report.completed = complete;
+    let skipped = report
+        .items
+        .iter()
+        .filter(|item| item.state == ItemState::Skipped)
+        .count();
+    let failed = report
+        .items
+        .iter()
+        .filter(|item| item.state == ItemState::Failed)
+        .count();
+    report.note = if report.aborted {
+        format!(
+            "Extraction canceled · {} extracted",
+            grouped(complete as u64)
+        )
+    } else {
+        format!(
+            "{} extracted · {} skipped · {} failed",
+            grouped(complete as u64),
+            grouped(skipped as u64),
+            grouped(failed as u64)
+        )
+    };
+    report
 }
 
 fn io_error(error: io::Error) -> Error {
@@ -718,6 +857,7 @@ fn register(
         match request.action {
             Transfer::Copy => operation.CopyItem(&shell_item, folder, name, None),
             Transfer::Move => operation.MoveItem(&shell_item, folder, name, None),
+            Transfer::Extract => unreachable!("ZIP extraction uses the archive worker"),
         }
     }
 }

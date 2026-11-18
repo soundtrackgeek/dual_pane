@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.0] - 2026-11-18
+
+### Added
+
+- Added read-only ZIP and ZIP64 browsing in either pane, including nested folders, filtering, sort, history, and tab restore.
+- Added F5 extraction through the Transfers queue, with streamed writes, progress, cancellation, per-item outcomes, and protection for existing destination names.
+- Added archive source rechecks, safe member path validation, and staging to keep incomplete or corrupt items out of the final destination.
+
 ## [0.8.0] - 2026-11-18
 
 ### Added

@@ -38,6 +38,7 @@ pub enum Notice {
 
 enum Target {
     Folder(usize, PathBuf, Option<Arc<InitialScan>>),
+    Idle,
     Stop,
 }
 
@@ -83,6 +84,7 @@ impl Watcher {
                             }
                         }
                         Some(Target::Stop) => break,
+                        Some(Target::Idle) => {}
                         None => {
                             if unsafe { WaitForSingleObject(request, INFINITE) } != WAIT_OBJECT_0 {
                                 break;
@@ -99,6 +101,10 @@ impl Watcher {
 
     pub fn watch(&self, id: usize, path: PathBuf, initial: Option<Arc<InitialScan>>) {
         self.request(Target::Folder(id, path, initial));
+    }
+
+    pub fn suspend(&self) {
+        self.request(Target::Idle);
     }
 
     fn request(&self, target: Target) {

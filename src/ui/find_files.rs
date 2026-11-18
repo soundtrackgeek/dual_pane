@@ -177,6 +177,17 @@ impl App {
         let query = Arc::new(Query::new(query.encode_wide().collect()));
         let active = self.active.get();
         let both = send(control(window, SCOPE), CB_GETCURSEL, 0, 0) == 1;
+        if self.panes[active].listing.borrow().archive.is_some()
+            || (both && self.panes[1 - active].listing.borrow().archive.is_some())
+        {
+            message(
+                window,
+                "Find Files",
+                "Choose disk folders for Find Files. Use Ctrl+F to filter the current ZIP folder.",
+                MB_OK | MB_ICONINFORMATION,
+            );
+            return;
+        }
         let generation = self.find_files.generation.get().wrapping_add(1);
         self.find_files.generation.set(generation);
 

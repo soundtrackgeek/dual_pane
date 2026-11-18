@@ -498,10 +498,13 @@ impl App {
                     job.status().to_owned()
                 }
             } else {
-                let progress = job
-                    .progress
-                    .percent
-                    .map_or_else(String::new, |pct| format!(" · Windows estimate {pct}%"));
+                let progress = job.progress.percent.map_or_else(String::new, |pct| {
+                    if matches!(job.request.action, Transfer::Extract) {
+                        format!(" · Streaming {pct}%")
+                    } else {
+                        format!(" · Windows estimate {pct}%")
+                    }
+                });
                 format!(
                     "{} · {} of {} confirmed{}",
                     job.status(),
@@ -668,9 +671,13 @@ impl App {
             .jobs
             .iter()
             .find(|job| Some(job.id) == self.transfers.selected.get())
-            .map(|job| job.request.paths.clone());
-        if let Some([source, destination]) = folders {
-            self.navigate(0, source);
+            .map(|job| (job.request.paths.clone(), job.request.zip_folder()));
+        if let Some(([source, destination], zip_folder)) = folders {
+            if let Some(folder) = zip_folder {
+                self.navigate_zip(0, source, folder);
+            } else {
+                self.navigate(0, source);
+            }
             self.navigate(1, destination);
             unsafe {
                 let _ = SetForegroundWindow(self.window);

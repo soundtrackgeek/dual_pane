@@ -51,6 +51,19 @@ impl App {
         self.focus_list(active);
     }
     pub fn save_pair(&self) {
+        if self
+            .panes
+            .iter()
+            .any(|pane| pane.listing.borrow().archive.is_some())
+        {
+            message(
+                self.window,
+                "Save folder pair",
+                "Open two disk folders to save a pair.",
+                MB_OK | MB_ICONINFORMATION,
+            );
+            return;
+        }
         let active = self.active.get();
         let folders = self
             .panes

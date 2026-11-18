@@ -43,7 +43,7 @@ Add `--no-workspace` for a temporary session that starts with the defaults and l
 | F2 | Rename the selected file or folder |
 | Ctrl+M | Review a batch rename for the selected files |
 | F3 | Preview the focused file in Quick View |
-| F5 / F6 | Queue a confirmed copy / move to the opposite pane |
+| F5 / F6 | Queue a confirmed copy / move to the opposite pane. F5 extracts from a ZIP. |
 | F7 | Create a folder in the active pane |
 | Delete | Confirm sending the selection to the Recycle Bin |
 | Alt+V | Open the View menu |
@@ -57,6 +57,14 @@ Use **Pairs…** to preview the left and right paths for a saved pair. Opening a
 The lists start in folders-first natural name order. Click **Name**, **Size**, or **Modified** to sort and click the same column again to reverse the order. The filter matches any part of a filename and ignores case. New folder visits start with a clear filter. Back and Forward return to the filter for that visit. The pane footer shows the filtered count and the selected count. Rows hidden by a filter leave the selection.
 
 Both local and UNC paths work for browsing. Dual Pane watches each open folder for changes and preserves the selected items and viewport when possible. An unsupported or disconnected watch leaves **Ctrl+R** available for a manual refresh. If Windows cannot recycle the selection, it presents a separate warning before a permanent deletion.
+
+## ZIP archives
+
+Focus a `.zip` file and press **Enter** or double-click it to browse the archive in that pane. Open its subfolders, sort the list, or use **Ctrl+F** to filter the current ZIP folder. **Backspace** goes up one level and leaves the ZIP at its root. **Alt+Left** and **Alt+Right** work with ZIP locations, and saved tabs can reopen a ZIP folder. Use **Ctrl+R** to reread an archive that changed.
+
+Select members and press **F5** to confirm extraction to the disk folder in the opposite pane. A selected folder includes its descendants. Follow the job in **Transfers**. Existing names are skipped, including destination folders. A member is published only after it has been written and checked. If you cancel, completed items remain in place and the current partial item is discarded.
+
+Browsing and extraction support read-only ZIP and ZIP64. Extraction supports stored and Deflate members. Password-protected and unsupported compression methods show an error in the job results. Entries with invalid Windows names, paths outside the archive folder, or links are omitted and counted in the pane. The archive is rechecked when a queued job starts.
 
 ## Batch Rename
 
@@ -94,11 +102,11 @@ Reviewed copy supports regular files. Name collisions, file/folder conflicts, fo
 
 ## Transfers
 
-Open **Transfers** or press **Ctrl+J**. Copies, moves, and reviewed copies run in order, one job at a time. The job keeps the source names and destination captured at confirmation. Each source's metadata is checked before Windows starts the job.
+Open **Transfers** or press **Ctrl+J**. Copies, moves, reviewed copies, and ZIP extractions run in order, one job at a time. The job keeps the source names and destination captured at confirmation. Each source is rechecked when the job starts.
 
 The panel stays open while you browse. Select a job to see its paths, Windows' progress estimate, and results for the selected top-level items. Windows shows its file conflict and progress dialogs when needed. **Pause queue** holds the next job, **Remove waiting** cancels a job before it starts, and **Cancel transfer** asks Windows to stop the active job at its next cancellation point. Completed items remain in place.
 
-**Retry verified** queues candidates from the selected job. At the front of the queue it checks the original regular file's identity and metadata and requires its destination name to be empty. Use **Open folders** to return both panes to the job's source and destination. Review unconfirmed items there before deciding whether to transfer them again.
+**Retry verified** queues copy and move candidates from the selected job. At the front of the queue it checks the original regular file's identity and metadata and requires its destination name to be empty. Use **Open folders** to return both panes to the job's source and destination. For ZIP extraction, select the remaining members and press **F5** again.
 
 The queue and its recent history belong to the current app session. Closing the app with waiting jobs asks whether to discard them.
 
@@ -111,6 +119,12 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
+
+## 0.9.0 verification
+
+Over five warm-cache Windows x64 runs, a **100,000-entry ZIP64** populated the pane in a median of **130 ms**. Median sampled peak private working set was **30.11 MiB** during indexing and **11.03 MiB** after the list loaded. Windows recorded **0 ms** of process CPU time over 10 seconds with the ZIP list idle.
+
+A separate run streamed a **3 GiB** ZIP64 member in **19.6 seconds**, including scripted confirmation, with a sampled peak private working set of **2.74 MiB**. A mid-stream cancellation kept the completed small file and removed the partial large item. Desktop checks also covered Unicode, nested and empty folders, ZIP history and filtering, an existing destination file and junction, and a CRC failure.
 
 ## 0.8.0 verification
 
