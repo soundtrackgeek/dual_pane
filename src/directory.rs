@@ -58,25 +58,27 @@ impl Entry {
                     format!("{} KB", grouped(self.size.div_ceil(1024)))
                 }
             }
-            2 => {
-                let mut utc = SYSTEMTIME::default();
-                let mut time = SYSTEMTIME::default();
-                if unsafe {
-                    FileTimeToSystemTime(&self.modified, &mut utc)
-                        .and_then(|()| SystemTimeToTzSpecificLocalTimeEx(None, &utc, &mut time))
-                }
-                .is_ok()
-                {
-                    format!(
-                        "{:04}-{:02}-{:02}  {:02}:{:02}",
-                        time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute
-                    )
-                } else {
-                    String::new()
-                }
-            }
+            2 => display_time(self.modified),
             _ => String::new(),
         }
+    }
+}
+
+pub fn display_time(timestamp: FILETIME) -> String {
+    let mut utc = SYSTEMTIME::default();
+    let mut time = SYSTEMTIME::default();
+    if unsafe {
+        FileTimeToSystemTime(&timestamp, &mut utc)
+            .and_then(|()| SystemTimeToTzSpecificLocalTimeEx(None, &utc, &mut time))
+    }
+    .is_ok()
+    {
+        format!(
+            "{:04}-{:02}-{:02}  {:02}:{:02}",
+            time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute
+        )
+    } else {
+        String::new()
     }
 }
 

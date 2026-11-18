@@ -34,6 +34,7 @@ Add `--no-workspace` for a temporary session that starts with the defaults and l
 | Ctrl+R | Refresh the active pane |
 | Ctrl+A | Select all visible rows in the active file list |
 | Ctrl+X / Ctrl+C / Ctrl+V | Cut / copy / paste Windows files and folders in a file list |
+| Ctrl+Z | Review the latest operation with files available for undo |
 | Ctrl+F | Focus the active pane's filename filter |
 | Alt+F7 | Find files in subfolders |
 | Ctrl+1 / Ctrl+2 / Ctrl+3 | Sort by Name / Size / Modified. Repeat to reverse direction |
@@ -58,6 +59,14 @@ Use **Pairs…** to preview the left and right paths for a saved pair. Opening a
 The lists start in folders-first natural name order. Click **Name**, **Size**, or **Modified** to sort and click the same column again to reverse the order. The filter matches any part of a filename and ignores case. New folder visits start with a clear filter. Back and Forward return to the filter for that visit. The pane footer shows the filtered count and the selected count. Rows hidden by a filter leave the selection.
 
 Both local and UNC paths work for browsing. Dual Pane watches each open folder for changes and preserves the selected items and viewport when possible. An unsupported or disconnected watch leaves **Ctrl+R** available for a manual refresh. If Windows cannot recycle the selection, it presents a separate warning before a permanent deletion.
+
+## Undo and Operation History
+
+Press **Ctrl+Z** from a file list, or choose **View → Operation History…**. The review shows the recorded path, the original path, and the state of each file. Select an operation to look back through the history. **Undo ready** confirms and restores the eligible files.
+
+History records confirmed regular-file renames, batch renames, and same-volume moves into empty destinations. A canceled operation contributes the files that completed. Undo checks the file identifier, metadata, and folder identities, and uses a no-overwrite rename. If a file changed or the original name is occupied, that row is blocked. Use **Refresh** to review again after clearing a conflict.
+
+The most recent 24 operations and up to 20,000 file changes are kept within a 16 MiB history budget under `%LOCALAPPDATA%\DualPane\History`. A `--no-workspace` session keeps its undo history in memory until it closes.
 
 ## Windows clipboard and drag-and-drop
 
@@ -117,7 +126,7 @@ The panel stays open while you browse. Select a job to see its paths, Windows' p
 
 **Retry verified** queues copy and move candidates from the selected job. At the front of the queue it checks the original regular file's identity and metadata and requires its destination name to be empty. Use **Open folders** to return both panes to the job's source and destination. For ZIP extraction, select the remaining members and press **F5** again.
 
-The queue and its recent history belong to the current app session. Closing the app with waiting jobs asks whether to discard them.
+The queue and its transfer reports belong to the current app session. Confirmed, eligible moves also appear in Operation History. Closing the app with waiting jobs asks whether to discard them.
 
 ## Implementation
 
@@ -128,6 +137,12 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
+
+## 0.11.0 verification
+
+Windows desktop checks restored a batch rename after restarting, blocked an original name created after review, and restored the remaining file after the conflict was cleared. They also covered a case-only rename and an in-place edit that kept the same file size and had its write timestamp reset.
+
+In a 3,500-file move canceled after work started, Operation History offered only the completed items. Undo returned those files to their original folder without changing the unattempted files.
 
 ## 0.10.0 verification
 

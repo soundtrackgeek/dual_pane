@@ -2,24 +2,20 @@ use std::{
     ffi::OsString,
     fs::{File, OpenOptions},
     io,
-    mem::{offset_of, size_of},
-    os::windows::{ffi::OsStringExt, fs::OpenOptionsExt, io::AsRawHandle},
+    os::windows::{ffi::OsStringExt, fs::OpenOptionsExt},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use windows::Win32::{
-    Foundation::HANDLE,
-    Storage::FileSystem::{
-        DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED,
-        FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE, FileRenameInfo,
-        GetFinalPathNameByHandleW, SetFileInformationByHandle,
-    },
+use windows::Win32::Storage::FileSystem::{
+    DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
 
 use crate::{
     compare::{self, Identity, Index, Stamp, ordinal},
     directory::{self, Entry},
+    undo,
 };
 
 pub struct Selection {
@@ -143,6 +139,7 @@ pub struct Report {
     pub rows: Vec<Outcome>,
     pub renamed: usize,
     pub reason: Option<String>,
+    pub undo: Vec<undo::Receipt>,
 }
 
 impl Report {
@@ -158,6 +155,7 @@ impl Report {
                 .collect(),
             renamed: 0,
             reason: Some(reason),
+            undo: Vec::new(),
         }
     }
 
@@ -356,10 +354,19 @@ pub fn apply(plan: &Plan) -> Report {
         let Some(identity) = row.identity else {
             continue;
         };
-        let result = rename(&folder, original, &row.target, identity);
-        if let Err(error) = result {
-            report.fail(index, false, error);
-            return report;
+        match rename(
+            &folder,
+            original,
+            &row.target,
+            identity,
+            plan,
+            report.undo.len() < undo::MAX_ITEMS,
+        ) {
+            Ok(receipt) => report.undo.extend(receipt),
+            Err(error) => {
+                report.fail(index, false, error);
+                return report;
+            }
         }
         report.rows[index] = Outcome::Renamed;
         report.renamed += 1;
@@ -377,29 +384,18 @@ fn locked_folder(plan: &Plan) -> io::Result<(File, PathBuf)> {
     if compare::directory_handle_identity(&lock)? != plan.root {
         return Err(io::Error::other("The reviewed folder was replaced."));
     }
-    // Resolve the reviewed handle to a fully qualified Windows path. A bare
-    // target name passed to the Win32 rename API can resolve against the CWD.
-    let handle = HANDLE(lock.as_raw_handle());
-    let mut path = vec![0; 512];
-    loop {
-        let length = unsafe { GetFinalPathNameByHandleW(handle, &mut path, FILE_NAME_NORMALIZED) };
-        if length == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if (length as usize) < path.len() {
-            let path = PathBuf::from(OsString::from_wide(&path[..length as usize]));
-            if !path.is_absolute() {
-                return Err(io::Error::other(
-                    "Windows did not return an absolute folder path.",
-                ));
-            }
-            return Ok((lock, path));
-        }
-        path.resize(length as usize + 1, 0);
-    }
+    let path = undo::final_path(&lock)?;
+    Ok((lock, path))
 }
 
-fn rename(folder: &Path, original: &Entry, target: &[u16], identity: Identity) -> io::Result<()> {
+fn rename(
+    folder: &Path,
+    original: &Entry,
+    target: &[u16],
+    identity: Identity,
+    plan: &Plan,
+    record: bool,
+) -> io::Result<Option<undo::Receipt>> {
     let file = OpenOptions::new()
         .access_mode((DELETE | FILE_READ_ATTRIBUTES).0)
         .share_mode(FILE_SHARE_READ.0)
@@ -411,28 +407,19 @@ fn rename(folder: &Path, original: &Entry, target: &[u16], identity: Identity) -
         ));
     }
 
-    let destination = directory::extended_path(&named_path(folder, target));
-    let offset = offset_of!(FILE_RENAME_INFO, FileName);
-    let length = offset + destination.len() * size_of::<u16>();
-    // A zeroed, aligned header gives Windows ReplaceIfExists = FALSE and a
-    // null RootDirectory. FileName is the variable-length UTF-16 tail.
-    let mut buffer = vec![0_usize; length.div_ceil(size_of::<usize>())];
-    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-    unsafe {
-        (*info).FileNameLength = ((destination.len() - 1) * size_of::<u16>()) as u32;
-        std::ptr::copy_nonoverlapping(
-            destination.as_ptr(),
-            info.cast::<u8>().add(offset).cast(),
-            destination.len(),
-        );
-        SetFileInformationByHandle(
-            HANDLE(file.as_raw_handle()),
-            FileRenameInfo,
-            info.cast(),
-            length as u32,
-        )
-    }
-    .map_err(io::Error::other)
+    let candidate = if record {
+        Some(undo::Candidate::locked(
+            named_path(&plan.selection.folder, &original.name),
+            named_path(&plan.selection.folder, target),
+            plan.root,
+            &file,
+        ))
+        .flatten()
+    } else {
+        None
+    };
+    undo::rename_handle(&file, &named_path(folder, target))?;
+    Ok(candidate.and_then(|candidate| candidate.confirm_handle(&file)))
 }
 
 #[cfg(test)]

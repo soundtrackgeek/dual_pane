@@ -215,10 +215,18 @@ impl App {
         let job = plan.clone();
         let sender = self.sender.clone();
         let owner = self.window.0 as usize;
+        let store = self.undo_store.clone();
         if let Err(error) = thread::Builder::new()
             .name("batch-rename".into())
             .spawn(move || {
-                let report = batch_rename::apply(&job);
+                let mut report = batch_rename::apply(&job);
+                if let Err(error) = store.record(
+                    crate::undo::Kind::BatchRename,
+                    std::mem::take(&mut report.undo),
+                ) {
+                    let reason = report.reason.get_or_insert_with(|| "Finished".into());
+                    reason.push_str(&format!(" · Could not save undo history: {error}"));
+                }
                 if sender.send(Event::RenameFinished(report)).is_ok() {
                     wake(owner);
                 }

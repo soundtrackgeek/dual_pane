@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.0] - 2026-11-18
+
+### Added
+
+- Added Ctrl+Z and Operation History for confirmed file renames, batch renames, and same-volume moves, including completed items from canceled operations.
+- Added per-file undo review with file identity, metadata, folder, and destination checks and a no-overwrite restore.
+- Added bounded local history that survives restarts and records restored items.
+
 ## [0.10.0] - 2026-11-18
 
 ### Added

@@ -52,6 +52,7 @@ mod pairs;
 mod prompt;
 mod quick_view;
 mod transfers;
+mod undo_history;
 mod workspace;
 
 use navigation::{Anchors, Location, SavedPair, Tabs};
@@ -80,6 +81,7 @@ const BATCH_RENAME: u16 = 118;
 const CLIP_CUT: u16 = 119;
 const CLIP_COPY: u16 = 120;
 const CLIP_PASTE: u16 = 127;
+const OP_HISTORY: u16 = 128;
 const LEFT_UP: u16 = 121;
 const RIGHT_UP: u16 = 122;
 const LEFT_CLEAR: u16 = 125;
@@ -107,12 +109,16 @@ enum Event {
     PreviewFinished(usize, Option<crate::preview::Preview>),
     RenameReviewed(usize, std::io::Result<crate::batch_rename::Plan>),
     RenameFinished(crate::batch_rename::Report),
+    HistoryLoaded(usize, std::io::Result<Vec<Arc<crate::undo::Group>>>),
+    HistoryReviewed(usize, Vec<crate::undo::Check>),
+    UndoFinished(std::io::Result<crate::undo::Applied>),
 }
 
 struct Changes {
     folders: Vec<PathBuf>,
     rename: Option<Rename>,
     reveal: Option<(usize, usize, usize, Vec<u16>)>,
+    history_error: Option<String>,
 }
 
 impl Changes {
@@ -121,6 +127,7 @@ impl Changes {
             folders: vec![folder],
             rename: None,
             reveal: None,
+            history_error: None,
         }
     }
 }
@@ -226,6 +233,8 @@ struct App {
     quick_view: quick_view::QuickView,
     batch_rename: batch_rename::BatchRename,
     file_interop: file_interop::FileInterop,
+    undo_store: Arc<crate::undo::Store>,
+    undo_history: undo_history::History,
     saved_pairs: RefCell<Vec<SavedPair>>,
     menu: HMENU,
     accessibility: Option<IAccPropServices>,
@@ -305,6 +314,7 @@ pub fn run() -> Result<()> {
                         app.find_files.window.get(),
                         app.quick_view.window.get(),
                         app.batch_rename.window.get(),
+                        app.undo_history.window.get(),
                     ]
                     .into_iter()
                     .find(|panel| {
@@ -660,6 +670,7 @@ impl App {
             menu_label(menu, BATCH_RENAME, w!("&Batch Rename…\tCtrl+M"))?;
             menu_label(menu, COMPARE, w!("Compare &folders…\tCtrl+Shift+C"))?;
             menu_label(menu, TRANSFERS, w!("&Transfers\tCtrl+J"))?;
+            menu_label(menu, OP_HISTORY, w!("Operation &History…\tCtrl+Z"))?;
             AppendMenuW(menu, MF_SEPARATOR, 0, None)?;
             menu_label(menu, CLIP_CUT, w!("Cu&t files\tCtrl+X"))?;
             menu_label(menu, CLIP_COPY, w!("Cop&y files\tCtrl+C"))?;
@@ -692,6 +703,8 @@ impl App {
             quick_view: Default::default(),
             batch_rename: Default::default(),
             file_interop: Default::default(),
+            undo_store: Arc::new(crate::undo::Store::new(workspace.persist)),
+            undo_history: Default::default(),
             saved_pairs: RefCell::new(workspace.pairs.clone()),
             menu,
             accessibility,
@@ -901,7 +914,11 @@ impl App {
         let pane = &self.panes[index];
         let mut listing = pane.listing.borrow_mut();
         listing.dirty = true;
-        if listing.loading || listing.refresh_pending || self.batch_running_in(&listing.path) {
+        if listing.loading
+            || listing.refresh_pending
+            || self.batch_running_in(&listing.path)
+            || self.undo_running_in(&listing.path)
+        {
             return;
         }
         listing.refresh_pending = self.timer(REFRESH_TIMER + index, 100);
@@ -927,7 +944,7 @@ impl App {
         let pane = &self.panes[index];
         self.kill_timer(REFRESH_TIMER + index);
         let mut listing = pane.listing.borrow_mut();
-        if self.batch_running_in(&listing.path) {
+        if self.batch_running_in(&listing.path) || self.undo_running_in(&listing.path) {
             listing.dirty = true;
             listing.refresh_pending = false;
             return;
@@ -1468,17 +1485,32 @@ impl App {
         self.focus_list(index);
     }
 
-    fn submit(&self, operation: Operation, changes: Changes) {
+    fn submit(&self, operation: Operation, mut changes: Changes) {
         self.operation_active.set(true);
         let verb = operation.verb();
         *self.operation_status.borrow_mut() = format!("{verb} in progress…");
         self.status_changed();
         let sender = self.sender.clone();
+        let store = self.undo_store.clone();
         let owner = self.window.0 as usize;
         if let Err(error) = thread::Builder::new()
             .name("file-operation".into())
             .spawn(move || {
+                let candidate = if let Operation::Rename { source, name } = &operation {
+                    let target = source.with_file_name(name);
+                    crate::undo::Candidate::capture(source, &target)
+                        .map(|candidate| (candidate, target))
+                } else {
+                    None
+                };
                 let result = operation.perform(owner);
+                if matches!(result, Ok(false))
+                    && let Some((candidate, target)) = candidate
+                    && let Some(receipt) = candidate.confirm(&target)
+                    && let Err(error) = store.record(crate::undo::Kind::Rename, vec![receipt])
+                {
+                    changes.history_error = Some(error.to_string());
+                }
                 if sender.send(Event::Operation(verb, changes, result)).is_ok() {
                     wake(owner);
                 }
@@ -1490,6 +1522,7 @@ impl App {
                     folders: Vec::new(),
                     rename: None,
                     reveal: None,
+                    history_error: None,
                 },
                 Err(windows::core::Error::new(E_FAIL, error.to_string())),
             );
@@ -1504,6 +1537,16 @@ impl App {
             Ok(true) => format!("{verb} stopped"),
             Err(_) => format!("{verb} failed"),
         };
+        if let Some(error) = &changes.history_error {
+            *self.operation_status.borrow_mut() =
+                format!("{verb} finished · Undo history could not be saved");
+            message(
+                self.window,
+                "Could not save undo history",
+                error,
+                MB_OK | MB_ICONWARNING,
+            );
+        }
         for index in 0..2 {
             let mut listing = self.panes[index].listing.borrow_mut();
             if !changes.folders.contains(&listing.path) {
@@ -1560,6 +1603,9 @@ impl App {
                 Event::PreviewFinished(id, preview) => self.receive_preview(id, preview),
                 Event::RenameReviewed(id, plan) => self.receive_batch_review(id, plan),
                 Event::RenameFinished(report) => self.finish_batch_rename(report),
+                Event::HistoryLoaded(id, result) => self.receive_undo_history(id, result),
+                Event::HistoryReviewed(id, checks) => self.receive_undo_review(id, checks),
+                Event::UndoFinished(applied) => self.finish_undo(applied),
             }
         }
     }
@@ -1578,6 +1624,7 @@ impl App {
             CLIP_CUT => self.publish_files(true),
             CLIP_COPY => self.publish_files(false),
             CLIP_PASTE => self.paste_files(),
+            OP_HISTORY => self.show_undo_history(),
             TRANSFERS => self.show_transfers(),
             REFRESH => self.refresh(self.active.get()),
             LEFT_CLEAR => self.clear_filter(0),
@@ -1658,6 +1705,7 @@ impl App {
             VK_V if ctrl && in_list && !shift => self.paste_files(),
             VK_J if ctrl => self.show_transfers(),
             VK_M if ctrl => self.show_batch_rename(),
+            VK_Z if ctrl && !shift && !in_edit && !filtering => self.show_undo_history(),
             VK_L if ctrl => unsafe {
                 let _ = SetFocus(Some(pane.path));
                 send(pane.path, EM_SETSEL, 0, -1);

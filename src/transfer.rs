@@ -30,6 +30,7 @@ use crate::{
     compare::{self, Comparison, Identity, Plan, Stamp},
     directory::{Entry, grouped, wide},
     shell::{self, Transfer},
+    undo,
 };
 
 enum Policy {
@@ -282,6 +283,7 @@ pub struct Report {
     pub note: String,
     pub aborted: bool,
     pub failed: bool,
+    pub undo: Vec<undo::Receipt>,
     roots: Option<[Identity; 2]>,
     completed: usize,
     retryable: usize,
@@ -302,6 +304,7 @@ impl Report {
             note: String::new(),
             aborted: false,
             failed: false,
+            undo: Vec::new(),
             roots: None,
             completed: 0,
             retryable: 0,
@@ -345,6 +348,7 @@ pub struct ProgressUpdate {
 struct Tracker {
     action: Transfer,
     paths: HashMap<PathBuf, usize>,
+    undo_candidates: HashMap<usize, undo::Candidate>,
     report: Report,
     cancel: Arc<AtomicBool>,
     send: Box<dyn Fn(ProgressUpdate) + Send>,
@@ -391,9 +395,9 @@ impl Sink_Impl {
         canceled(&self.0.lock().unwrap().cancel)
     }
 
-    fn before(&self, item: Ref<IShellItem>) -> Result<()> {
+    fn before(&self, item: Option<&IShellItem>) -> Result<()> {
         if let Err(error) = self.check_cancel() {
-            let path = shell_path(item.as_ref());
+            let path = shell_path(item);
             let mut tracker = self.0.lock().unwrap();
             if let Some(index) = path
                 .as_ref()
@@ -425,6 +429,12 @@ impl Sink_Impl {
             .and_then(|path| tracker.paths.get(path).copied());
         if let Some(index) = index {
             let state = classify(tracker.action, result, destination.as_ref().is_some());
+            if let Some(candidate) = tracker.undo_candidates.remove(&index)
+                && state == ItemState::Moved
+                && let Some(receipt) = actual.as_deref().and_then(|path| candidate.confirm(path))
+            {
+                tracker.report.undo.push(receipt);
+            }
             let detail = if state.completed() {
                 actual
                     .filter(|actual| {
@@ -518,7 +528,7 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
         _: Ref<IShellItem>,
         _: &PCWSTR,
     ) -> Result<()> {
-        self.before(item)
+        self.before(item.as_ref())
     }
     fn PreMoveItem(
         &self,
@@ -527,7 +537,20 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
         _: Ref<IShellItem>,
         _: &PCWSTR,
     ) -> Result<()> {
-        self.before(item)
+        self.before(item.as_ref())?;
+        let path = shell_path(item.as_ref());
+        let mut tracker = self.0.lock().unwrap();
+        if let Some(index) = path
+            .as_ref()
+            .and_then(|path| tracker.paths.get(path).copied())
+            && tracker
+                .undo_candidates
+                .get(&index)
+                .is_some_and(|candidate| !candidate.destination_empty())
+        {
+            tracker.undo_candidates.remove(&index);
+        }
+        Ok(())
     }
     fn PostCopyItem(
         &self,
@@ -621,6 +644,7 @@ pub fn run(
     let tracker = Arc::new(Mutex::new(Tracker {
         action: request.action,
         paths: HashMap::new(),
+        undo_candidates: HashMap::new(),
         report: Report::empty(request.files.len()),
         cancel: cancel.clone(),
         send: Box::new(send),
@@ -958,7 +982,7 @@ fn register(
         ));
     }
     let shell_item = shell::item(&source)?;
-    let canonical = shell_path(Some(&shell_item)).unwrap_or(source);
+    let canonical = shell_path(Some(&shell_item)).unwrap_or_else(|| source.clone());
     {
         let mut state = tracker.lock().unwrap();
         if state.paths.contains_key(&canonical) {
@@ -969,6 +993,14 @@ fn register(
         }
         state.paths.insert(canonical, index);
         state.report.items[index].retry_identity = identity;
+        if matches!(request.action, Transfer::Move)
+            && destination.is_none()
+            && stamp.is_some_and(Stamp::regular)
+            && state.undo_candidates.len() < undo::MAX_ITEMS
+            && let Some(candidate) = undo::Candidate::capture(&source, &target)
+        {
+            state.undo_candidates.insert(index, candidate);
+        }
     }
     let name = file.target.as_ref().map(wide);
     let name = name

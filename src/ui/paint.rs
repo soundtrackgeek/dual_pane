@@ -181,6 +181,7 @@ impl App {
         }
         self.update_find_font(font);
         self.update_batch_font(font);
+        self.update_history_font(font);
         unsafe {
             let _ = DeleteObject(previous.into());
         }

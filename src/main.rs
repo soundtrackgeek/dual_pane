@@ -24,6 +24,8 @@ mod transfer;
 #[cfg(windows)]
 mod ui;
 #[cfg(windows)]
+mod undo;
+#[cfg(windows)]
 mod watch;
 
 #[cfg(windows)]

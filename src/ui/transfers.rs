@@ -176,11 +176,12 @@ impl App {
         let sender = self.sender.clone();
         let owner = self.window.0 as usize;
         let count = request.files.len();
+        let store = self.undo_store.clone();
         if let Err(error) = thread::Builder::new()
             .name("transfer".into())
             .spawn(move || {
                 let progress_sender = sender.clone();
-                let report = transfer::run(&request, owner, cancel, move |progress| {
+                let mut report = transfer::run(&request, owner, cancel, move |progress| {
                     if progress_sender
                         .send(Event::TransferProgress(id, progress))
                         .is_ok()
@@ -188,6 +189,16 @@ impl App {
                         wake(owner);
                     }
                 });
+                if let Err(error) =
+                    store.record(crate::undo::Kind::Move, std::mem::take(&mut report.undo))
+                {
+                    if !report.note.is_empty() {
+                        report.note.push_str(" · ");
+                    }
+                    report
+                        .note
+                        .push_str(&format!("Could not save undo history: {error}"));
+                }
                 if sender.send(Event::TransferFinished(id, report)).is_ok() {
                     wake(owner);
                 }
