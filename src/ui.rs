@@ -41,10 +41,13 @@ use crate::{
     watch::{Notice, Rename, Watcher},
 };
 
+mod navigation;
 mod paint;
+mod pairs;
 mod prompt;
 mod workspace;
 
+use navigation::{Anchors, Location, SavedPair, Tabs};
 use workspace::Workspace;
 
 const WAKE: u32 = WM_APP + 1;
@@ -67,6 +70,15 @@ const LEFT_CLEAR: u16 = 125;
 const RIGHT_CLEAR: u16 = 126;
 const LEFT_FILTER: u16 = 151;
 const RIGHT_FILTER: u16 = 152;
+const LEFT_NEW_TAB: u16 = 181;
+const RIGHT_NEW_TAB: u16 = 182;
+const LEFT_CLOSE_TAB: u16 = 183;
+const RIGHT_CLOSE_TAB: u16 = 184;
+const LEFT_BACK: u16 = 185;
+const RIGHT_BACK: u16 = 186;
+const LEFT_FORWARD: u16 = 187;
+const RIGHT_FORWARD: u16 = 188;
+const PAIRS: u16 = 189;
 const SCAN_TIMER: usize = 200;
 const REFRESH_TIMER: usize = 210;
 
@@ -125,6 +137,7 @@ struct Listing {
     selection_epoch: usize,
     pending_reveal: Option<(usize, Vec<u16>)>,
     reveal: Option<(usize, Vec<u16>)>,
+    restore: Option<Anchors>,
 }
 
 impl Listing {
@@ -134,6 +147,11 @@ impl Listing {
 }
 
 struct Pane {
+    tabs: HWND,
+    new_tab: HWND,
+    close_tab: HWND,
+    back: HWND,
+    forward: HWND,
     path: HWND,
     up: HWND,
     filter: HWND,
@@ -142,6 +160,7 @@ struct Pane {
     scanner: Scanner,
     watcher: Watcher,
     listing: RefCell<Listing>,
+    navigation: RefCell<Tabs>,
 }
 
 #[derive(Clone, Copy)]
@@ -167,6 +186,8 @@ struct App {
     create: HWND,
     recycle: HWND,
     view: HWND,
+    pairs: HWND,
+    saved_pairs: RefCell<Vec<SavedPair>>,
     menu: HMENU,
     accessibility: Option<IAccPropServices>,
     active: Cell<usize>,
@@ -223,9 +244,8 @@ pub fn run() -> Result<()> {
     unsafe {
         let window = create_window()?;
         let app = attach(window, &workspace)?;
-        let [left, right] = workspace.paths;
-        app.navigate(0, left);
-        app.navigate(1, right);
+        app.activate_tab(0);
+        app.activate_tab(1);
         let _ = ShowWindow(window, SW_SHOW);
         app.focus_list(0);
 
@@ -236,10 +256,9 @@ pub fn run() -> Result<()> {
                 0 => break,
                 _ => {
                     if msg.message == WM_SYSKEYDOWN
-                        && msg.wParam.0 == VK_V.0 as usize
                         && msg.lParam.0 & (1 << 29) != 0
+                        && app.alt_key(VIRTUAL_KEY(msg.wParam.0 as u16))
                     {
-                        app.view_menu();
                         continue;
                     }
                     if msg.message == WM_KEYDOWN && app.key(msg.hwnd, msg.wParam.0 as u16) {
@@ -260,7 +279,7 @@ fn create_window() -> Result<HWND> {
         let instance = HINSTANCE(GetModuleHandleW(None)?.0);
         let controls = INITCOMMONCONTROLSEX {
             dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES,
+            dwICC: ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES | ICC_TAB_CLASSES,
         };
         InitCommonControlsEx(&controls).ok()?;
         let class = w!("DualPaneWindow");
@@ -301,8 +320,8 @@ fn attach(window: HWND, workspace: &Workspace) -> Result<Box<App>> {
     app.update_font();
     app.apply_theme();
     app.layout();
-    app.update_sort_header(0);
-    app.update_sort_header(1);
+    app.rebuild_tabs(0);
+    app.rebuild_tabs(1);
     Ok(app)
 }
 fn child(window: HWND, class: PCWSTR, label: PCWSTR, style: WINDOW_STYLE, id: u16) -> Result<HWND> {
@@ -341,14 +360,11 @@ fn menu_label(menu: HMENU, id: u16, label: PCWSTR) -> Result<()> {
 fn name_accessible_controls(panes: &[Pane; 2]) -> Option<IAccPropServices> {
     let service: IAccPropServices =
         unsafe { CoCreateInstance(&CLSID_AccPropServices, None, CLSCTX_INPROC_SERVER) }.ok()?;
-    for (control, name) in [
-        (panes[0].path, w!("Left folder path")),
-        (panes[0].filter, w!("Filter left folder by filename")),
-        (panes[0].list, w!("Left folder contents")),
-        (panes[1].path, w!("Right folder path")),
-        (panes[1].filter, w!("Filter right folder by filename")),
-        (panes[1].list, w!("Right folder contents")),
-    ] {
+    for (index, (control, names)) in panes.iter().enumerate().flat_map(|(index, pane)| {
+        pane.accessible_controls()
+            .into_iter()
+            .map(move |entry| (index, entry))
+    }) {
         for property in [Name_Property_GUID, PROPID_ACC_NAME] {
             unsafe {
                 let _ = service.SetHwndPropStr(
@@ -356,7 +372,7 @@ fn name_accessible_controls(panes: &[Pane; 2]) -> Option<IAccPropServices> {
                     OBJID_CLIENT.0 as u32,
                     CHILDID_SELF,
                     property,
-                    name,
+                    names[index],
                 );
             }
         }
@@ -365,13 +381,51 @@ fn name_accessible_controls(panes: &[Pane; 2]) -> Option<IAccPropServices> {
 }
 
 impl Pane {
+    fn accessible_controls(&self) -> [(HWND, [PCWSTR; 2]); 8] {
+        [
+            (self.path, [w!("Left folder path"), w!("Right folder path")]),
+            (
+                self.filter,
+                [
+                    w!("Filter left folder by filename"),
+                    w!("Filter right folder by filename"),
+                ],
+            ),
+            (
+                self.list,
+                [w!("Left folder contents"), w!("Right folder contents")],
+            ),
+            (self.tabs, [w!("Left folder tabs"), w!("Right folder tabs")]),
+            (self.new_tab, [w!("New left tab"), w!("New right tab")]),
+            (
+                self.close_tab,
+                [w!("Close left tab"), w!("Close right tab")],
+            ),
+            (self.back, [w!("Back in left tab"), w!("Back in right tab")]),
+            (
+                self.forward,
+                [w!("Forward in left tab"), w!("Forward in right tab")],
+            ),
+        ]
+    }
     fn new(
         window: HWND,
         index: usize,
         sender: Sender<Event>,
         icons: Option<&Icons>,
-        sort: Sort,
+        navigation: Tabs,
     ) -> Result<Self> {
+        let tabs = child(
+            window,
+            WC_TABCONTROLW,
+            PCWSTR::null(),
+            WS_TABSTOP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WINDOW_STYLE(TCS_FIXEDWIDTH),
+            161 + index as u16,
+        )?;
+        let new_tab = button(window, w!("+"), LEFT_NEW_TAB + index as u16)?;
+        let close_tab = button(window, w!("×"), LEFT_CLOSE_TAB + index as u16)?;
+        let back = button(window, w!("←"), LEFT_BACK + index as u16)?;
+        let forward = button(window, w!("→"), LEFT_FORWARD + index as u16)?;
         let path = child(
             window,
             w!("Edit"),
@@ -451,6 +505,11 @@ impl Pane {
             }
         })?;
         Ok(Self {
+            tabs,
+            new_tab,
+            close_tab,
+            back,
+            forward,
             path,
             up,
             filter,
@@ -458,10 +517,8 @@ impl Pane {
             list,
             scanner,
             watcher,
-            listing: RefCell::new(Listing {
-                sort,
-                ..Listing::default()
-            }),
+            listing: RefCell::new(Listing::default()),
+            navigation: RefCell::new(navigation),
         })
     }
 
@@ -504,8 +561,20 @@ impl App {
         let (sender, events) = mpsc::channel();
         let icons = Icons::load();
         let panes = [
-            Pane::new(window, 0, sender.clone(), icons.as_ref(), workspace.sort[0])?,
-            Pane::new(window, 1, sender.clone(), icons.as_ref(), workspace.sort[1])?,
+            Pane::new(
+                window,
+                0,
+                sender.clone(),
+                icons.as_ref(),
+                workspace.panes[0].snapshot(),
+            )?,
+            Pane::new(
+                window,
+                1,
+                sender.clone(),
+                icons.as_ref(),
+                workspace.panes[1].snapshot(),
+            )?,
         ];
         let copy = button(window, w!("F5   Copy"), COPY)?;
         let move_ = button(window, w!("F6   Move"), MOVE)?;
@@ -513,6 +582,7 @@ impl App {
         let create = button(window, w!("F7   Folder"), CREATE_FOLDER)?;
         let recycle = button(window, w!("Del   Recycle"), RECYCLE)?;
         let view = button(window, w!("View   ▾"), VIEW)?;
+        let pairs = button(window, w!("Pairs…"), PAIRS)?;
         let menu = unsafe {
             let menu = CreatePopupMenu()?;
             menu_label(menu, REFRESH, w!("&Refresh active pane\tCtrl+R"))?;
@@ -536,6 +606,8 @@ impl App {
             create,
             recycle,
             view,
+            pairs,
+            saved_pairs: RefCell::new(workspace.pairs.clone()),
             menu,
             accessibility,
             active: Cell::new(0),
@@ -557,6 +629,7 @@ impl App {
         for pane in &app.panes {
             unsafe {
                 SetWindowSubclass(pane.list, Some(control_proc), 1, window.0 as usize).ok()?;
+                SetWindowSubclass(pane.tabs, Some(paint::tab_proc), 1, window.0 as usize).ok()?;
             }
         }
         Ok(app)
@@ -605,6 +678,9 @@ impl App {
         if self.active.replace(index) != index {
             unsafe {
                 let _ = InvalidateRect(Some(self.window), None, false);
+                for pane in &self.panes {
+                    let _ = InvalidateRect(Some(pane.tabs), None, false);
+                }
             }
             self.status_changed();
         }
@@ -631,6 +707,26 @@ impl App {
                 return;
             }
         };
+        if pane.listing.borrow().path == path {
+            self.refresh(index);
+            return;
+        }
+        self.capture_tab(index);
+        pane.navigation
+            .borrow_mut()
+            .current_mut()
+            .go(Location::new(path));
+        self.activate_tab(index);
+    }
+
+    fn show_location(&self, index: usize, place: Location, sort: Sort) {
+        let pane = &self.panes[index];
+        let Location {
+            path,
+            query,
+            anchors,
+        } = place;
+        let filter_text = wide(OsString::from_wide(&query));
         self.kill_timer(SCAN_TIMER + index);
         self.kill_timer(REFRESH_TIMER + index);
         let (location, initial) = {
@@ -642,7 +738,9 @@ impl App {
                 location: listing.location.wrapping_add(1),
                 request,
                 view_request: listing.view_request.wrapping_add(1),
-                sort: listing.sort,
+                sort,
+                query,
+                restore: (!anchors.is_empty()).then_some(anchors),
                 loading: true,
                 initial: Some(initial.clone()),
                 ..Listing::default()
@@ -655,7 +753,7 @@ impl App {
         self.changing_rows.set(false);
         show_path(pane.path, &path);
         unsafe {
-            let _ = SetWindowTextW(pane.filter, w!(""));
+            let _ = SetWindowTextW(pane.filter, PCWSTR(filter_text.as_ptr()));
             let _ = EnableWindow(pane.up, parent_of(&path).is_some());
         }
         pane.watcher.watch(location, path, Some(initial));
@@ -850,6 +948,7 @@ impl App {
             return;
         }
         listing.query = query;
+        listing.restore = None;
         drop(listing);
         self.request_view(index, false);
     }
@@ -870,6 +969,7 @@ impl App {
             column == Column::Modified
         };
         listing.sort = Sort { column, descending };
+        listing.restore = None;
         drop(listing);
         self.update_sort_header(index);
         self.request_view(index, false);
@@ -943,6 +1043,11 @@ impl App {
         );
         let native_top = send(pane.list, LVM_GETTOPINDEX, 0, 0);
         let listing = pane.listing.borrow();
+        let restore = if listing.complete {
+            listing.restore.as_ref()
+        } else {
+            None
+        };
         let name_at = |row: isize| {
             listing
                 .rows
@@ -969,21 +1074,40 @@ impl App {
             .filter(|(epoch, _)| *epoch == listing.selection_epoch)
             .map(|(_, name)| name.as_slice());
         let total = rows.len();
-        let keep_viewport = listing.keep_viewport;
+        let keep_viewport = listing.keep_viewport || restore.is_some();
+        let fallback_top = restore.map_or(native_top.max(0) as usize, |state| state.top_index);
         let mut selected_rows = Vec::new();
         let mut focused_row = None;
         let mut top_row = None;
         let mut reveal_row = None;
-        if !selected.is_empty() || focused.is_some() || top.is_some() || reveal.is_some() {
+        if !selected.is_empty()
+            || focused.is_some()
+            || top.is_some()
+            || reveal.is_some()
+            || restore.is_some()
+        {
             for (row, entry) in rows.iter().enumerate() {
-                if selected.contains(entry.name.as_ref()) {
-                    selected_rows.push(row);
-                }
-                if focused == Some(entry.name.as_ref()) {
-                    focused_row = Some(row);
-                }
-                if top == Some(entry.name.as_ref()) {
-                    top_row = Some(row);
+                if let Some(state) = restore {
+                    let name = &entry.name[..entry.name.len() - 1];
+                    if name == state.selected {
+                        selected_rows.push(row);
+                    }
+                    if name == state.focused {
+                        focused_row = Some(row);
+                    }
+                    if name == state.top {
+                        top_row = Some(row);
+                    }
+                } else {
+                    if selected.contains(entry.name.as_ref()) {
+                        selected_rows.push(row);
+                    }
+                    if focused == Some(entry.name.as_ref()) {
+                        focused_row = Some(row);
+                    }
+                    if top == Some(entry.name.as_ref()) {
+                        top_row = Some(row);
+                    }
                 }
                 if reveal == Some(entry.name.as_ref()) {
                     reveal_row = Some(row);
@@ -997,6 +1121,9 @@ impl App {
             listing.projecting = false;
             listing.display_renames.clear();
             listing.reveal = None;
+            if listing.complete {
+                listing.restore = None;
+            }
         }
         self.changing_rows.set(true);
         item_state(
@@ -1033,7 +1160,7 @@ impl App {
             if reveal_row.is_some() {
                 send(pane.list, LVM_ENSUREVISIBLE, focus, 0);
             } else if keep_viewport {
-                let top = top_row.unwrap_or_else(|| (native_top.max(0) as usize).min(total - 1));
+                let top = top_row.unwrap_or_else(|| fallback_top.min(total - 1));
                 scroll_to(pane.list, top);
             } else {
                 scroll_to(pane.list, 0);
@@ -1281,6 +1408,15 @@ impl App {
             REFRESH => self.refresh(self.active.get()),
             LEFT_CLEAR => self.clear_filter(0),
             RIGHT_CLEAR => self.clear_filter(1),
+            LEFT_NEW_TAB => self.create_tab(0),
+            RIGHT_NEW_TAB => self.create_tab(1),
+            LEFT_CLOSE_TAB => self.close_tab(0),
+            RIGHT_CLOSE_TAB => self.close_tab(1),
+            LEFT_BACK => self.history(0, false),
+            RIGHT_BACK => self.history(1, false),
+            LEFT_FORWARD => self.history(0, true),
+            RIGHT_FORWARD => self.history(1, true),
+            PAIRS => self.pick_folder_pair(),
             SORT_NAME..=SORT_MODIFIED => {
                 let column = Column::from_index((command - SORT_NAME) as usize).unwrap();
                 self.sort_by(self.active.get(), column);
@@ -1334,8 +1470,14 @@ impl App {
         let filtering = control == pane.filter;
         let in_list = control == pane.list;
         let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+        let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
         match VIRTUAL_KEY(key) {
+            VK_TAB if ctrl => self.cycle_tab(active, shift),
             VK_TAB => self.focus_list(1 - active),
+            VK_T if ctrl => self.create_tab(active),
+            VK_W if ctrl => self.close_tab(active),
+            VK_P if ctrl && shift => self.save_pair(),
+            VK_P if ctrl => self.pick_folder_pair(),
             VK_L if ctrl => unsafe {
                 let _ = SetFocus(Some(pane.path));
                 send(pane.path, EM_SETSEL, 0, -1);
@@ -1389,6 +1531,23 @@ impl App {
 
     fn notify(&self, data: LPARAM) -> LRESULT {
         let header = unsafe { &*(data.0 as *const NMHDR) };
+        if let Some(index) = self
+            .panes
+            .iter()
+            .position(|pane| pane.tabs == header.hwndFrom)
+        {
+            match header.code {
+                TCN_SELCHANGE => {
+                    let selected = send(header.hwndFrom, TCM_GETCURSEL, 0, 0);
+                    if selected >= 0 {
+                        self.select_tab(index, selected as usize);
+                    }
+                }
+                NM_SETFOCUS => self.active(index),
+                _ => {}
+            }
+            return LRESULT(0);
+        }
         let Some(index) = self
             .panes
             .iter()
@@ -1453,27 +1612,44 @@ impl App {
             LVN_ITEMCHANGED | LVN_ODSTATECHANGED if !self.changing_rows.get() => {
                 let mut listing = pane.listing.borrow_mut();
                 listing.selection_epoch = listing.selection_epoch.wrapping_add(1);
+                listing.restore = None;
                 drop(listing);
                 self.status_changed()
+            }
+            LVN_BEGINSCROLL if !self.changing_rows.get() => {
+                pane.listing.borrow_mut().restore = None;
             }
             _ => {}
         }
         LRESULT(0)
     }
 
-    fn save_workspace(&self) {
+    fn save_workspace(&self) -> Result<()> {
         if self.persist {
-            let left = self.panes[0].listing.borrow();
-            let right = self.panes[1].listing.borrow();
+            self.capture_tab(0);
+            self.capture_tab(1);
             let settings = Workspace {
-                paths: [left.path.clone(), right.path.clone()],
-                sort: [left.sort, right.sort],
+                panes: std::array::from_fn(|index| {
+                    self.panes[index].navigation.borrow().snapshot()
+                }),
+                pairs: self.saved_pairs.borrow().clone(),
                 theme: self.theme.get(),
                 split: self.split.get(),
                 persist: true,
             };
-            let _ = settings.save();
+            settings.save()?;
         }
+        Ok(())
+    }
+
+    fn alt_key(&self, key: VIRTUAL_KEY) -> bool {
+        match key {
+            VK_V => self.view_menu(),
+            VK_LEFT => self.history(self.active.get(), false),
+            VK_RIGHT => self.history(self.active.get(), true),
+            _ => return false,
+        }
+        true
     }
 }
 
@@ -1743,14 +1919,16 @@ unsafe extern "system" fn window_proc(
                     );
                     return LRESULT(0);
                 }
-                WM_CLOSE => app.save_workspace(),
+                WM_CLOSE => {
+                    let _ = app.save_workspace();
+                }
                 WM_NCDESTROY => {
                     SetWindowLongPtrW(window, GWLP_USERDATA, 0);
                 }
                 WM_DESTROY => {
                     if let Some(service) = &app.accessibility {
                         for pane in &app.panes {
-                            for control in [pane.path, pane.list] {
+                            for (control, _) in pane.accessible_controls() {
                                 let _ = service.ClearHwndProps(
                                     control,
                                     OBJID_CLIENT.0 as u32,

@@ -148,7 +148,18 @@ impl App {
         }
         let previous = self.font.replace(font);
         for pane in &self.panes {
-            for control in [pane.path, pane.up, pane.filter, pane.clear, pane.list] {
+            for control in [
+                pane.tabs,
+                pane.new_tab,
+                pane.close_tab,
+                pane.back,
+                pane.forward,
+                pane.path,
+                pane.up,
+                pane.filter,
+                pane.clear,
+                pane.list,
+            ] {
                 send(control, WM_SETFONT, font.0 as usize, 0);
             }
             let header = send(pane.list, LVM_GETHEADER, 0, 0);
@@ -162,6 +173,7 @@ impl App {
             self.move_,
             self.create,
             self.recycle,
+            self.pairs,
             self.view,
         ] {
             send(control, WM_SETFONT, font.0 as usize, 0);
@@ -259,28 +271,53 @@ impl App {
         for (pane, bounds) in self.panes.iter().zip(panes) {
             let left = bounds.left;
             let right = bounds.right;
+            let strip = right - left - s(68);
+            place(pane.tabs, left, bounds.top + s(27), strip, s(29));
+            let tab_width = (strip - s(38)).clamp(s(75), s(126)) as isize;
+            send(
+                pane.tabs,
+                TCM_SETITEMSIZE,
+                0,
+                tab_width | ((s(23) as isize) << 16),
+            );
+            place(
+                pane.new_tab,
+                right - s(62),
+                bounds.top + s(28),
+                s(29),
+                s(26),
+            );
+            place(
+                pane.close_tab,
+                right - s(29),
+                bounds.top + s(28),
+                s(29),
+                s(26),
+            );
+            place(pane.back, left, bounds.top + s(60), s(30), s(33));
+            place(pane.forward, left + s(35), bounds.top + s(60), s(30), s(33));
             place(
                 pane.path,
-                left + s(11),
-                bounds.top + s(37),
-                right - left - s(77),
+                left + s(81),
+                bounds.top + s(68),
+                right - left - s(147),
                 s(20),
             );
-            place(pane.up, right - s(53), bounds.top + s(29), s(53), s(33));
+            place(pane.up, right - s(53), bounds.top + s(60), s(53), s(33));
             place(
                 pane.filter,
                 left + s(59),
-                bounds.top + s(71),
+                bounds.top + s(102),
                 right - left - s(136),
                 s(20),
             );
-            place(pane.clear, right - s(53), bounds.top + s(66), s(53), s(28));
+            place(pane.clear, right - s(53), bounds.top + s(97), s(53), s(28));
             place(
                 pane.list,
                 left + 1,
-                bounds.top + s(105),
+                bounds.top + s(136),
                 right - left - 2,
-                bounds.bottom - bounds.top - s(135),
+                bounds.bottom - bounds.top - s(166),
             );
             let slim = right - left < s(305);
             let size = if slim { s(61) } else { s(82) };
@@ -293,21 +330,30 @@ impl App {
             }
         }
         let mut x = footer.left;
-        for (button, width) in [
-            (self.rename, 104),
-            (self.copy, 85),
-            (self.move_, 85),
-            (self.create, 100),
-            (self.recycle, 103),
+        let compact = footer.right - footer.left < s(880);
+        for (button, wide, narrow) in [
+            (self.rename, 104, 94),
+            (self.copy, 85, 73),
+            (self.move_, 85, 73),
+            (self.create, 100, 92),
+            (self.recycle, 103, 91),
         ] {
+            let width = if compact { narrow } else { wide };
             place(button, x, footer.top + s(13), s(width), s(32));
             x += s(width + 7);
         }
         place(
-            self.view,
-            footer.right - s(94),
+            self.pairs,
+            footer.right - s(174),
             footer.top + s(13),
-            s(94),
+            s(78),
+            s(32),
+        );
+        place(
+            self.view,
+            footer.right - s(88),
+            footer.top + s(13),
+            s(88),
             s(32),
         );
         unsafe {
@@ -369,16 +415,16 @@ impl App {
             );
 
             let path_frame = RECT {
-                top: bounds.top + s(29),
-                bottom: bounds.top + s(62),
+                left: bounds.left + s(70),
+                top: bounds.top + s(60),
+                bottom: bounds.top + s(93),
                 right: bounds.right - s(59),
-                ..bounds
             };
             background(dc, path_frame, p.edge);
             background(dc, inset(path_frame, 1, 1), p.surface);
             let filter = RECT {
-                top: bounds.top + s(66),
-                bottom: bounds.top + s(94),
+                top: bounds.top + s(97),
+                bottom: bounds.top + s(125),
                 right: bounds.right - s(59),
                 ..bounds
             };
@@ -396,7 +442,7 @@ impl App {
                 DT_LEFT,
             );
             let list_frame = RECT {
-                top: bounds.top + s(104),
+                top: bounds.top + s(135),
                 ..bounds
             };
             background(dc, list_frame, p.edge);
@@ -453,12 +499,83 @@ impl App {
             );
         }
         let note = self.operation_status.borrow();
+        let compact = layout.footer.right - layout.footer.left < s(880);
         let area = RECT {
-            left: layout.footer.left + s(522),
-            right: layout.footer.right - s(107),
+            left: layout.footer.left + s(if compact { 466 } else { 522 }),
+            right: layout.footer.right - s(184),
             ..layout.footer
         };
         label(dc, area, &note, p.muted, DT_RIGHT);
+    }
+
+    fn paint_tabs(&self, strip: HWND, dc: HDC) {
+        let Some((index, pane)) = self
+            .panes
+            .iter()
+            .enumerate()
+            .find(|(_, pane)| pane.tabs == strip)
+        else {
+            return;
+        };
+        let mut client = RECT::default();
+        let p = self.palette.borrow();
+        let tabs = pane.navigation.borrow();
+        let previous_font = unsafe {
+            let _ = GetClientRect(strip, &mut client);
+            SelectObject(dc, self.font.get().into())
+        };
+        background(dc, client, p.canvas);
+        let mut edge = client;
+        edge.top = edge.bottom - 1;
+        background(dc, edge, p.edge);
+        for (position, tab) in tabs.items.iter().enumerate() {
+            let mut rect = RECT::default();
+            if send(
+                strip,
+                TCM_GETITEMRECT,
+                position,
+                (&mut rect as *mut RECT) as isize,
+            ) == 0
+                || rect.right <= client.left
+                || rect.left >= client.right
+            {
+                continue;
+            }
+            rect.right -= self.scale(3);
+            let selected = tabs.active == position;
+            background(dc, rect, p.edge);
+            let fill = if selected && self.active.get() == index {
+                p.active_strip
+            } else if selected {
+                p.surface
+            } else {
+                p.strip
+            };
+            background(dc, inset(rect, 1, 1), fill);
+            if selected {
+                let line = RECT {
+                    top: rect.bottom - self.scale(2),
+                    ..rect
+                };
+                background(dc, line, p.accent);
+            }
+            let title = tab.location.title().to_string_lossy();
+            label(
+                dc,
+                inset(rect, self.scale(9), 0),
+                &title,
+                if selected { p.text } else { p.muted },
+                DT_LEFT,
+            );
+            if selected && unsafe { GetFocus() } == strip {
+                unsafe {
+                    let _ = DrawFocusRect(dc, &inset(rect, self.scale(3), self.scale(3)));
+                }
+            }
+        }
+        unsafe {
+            SelectObject(dc, previous_font);
+        }
     }
 
     pub fn draw_button(&self, item: &DRAWITEMSTRUCT) {
@@ -630,5 +747,39 @@ fn label(dc: HDC, mut rect: RECT, text: &str, color: COLORREF, align: DRAW_TEXT_
             &mut rect,
             DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX | align,
         );
+    }
+}
+
+pub(super) unsafe extern "system" fn tab_proc(
+    window: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    id: usize,
+    parent: usize,
+) -> LRESULT {
+    unsafe {
+        let app = (GetWindowLongPtrW(HWND(parent as _), GWLP_USERDATA) as *const App).as_ref();
+        if let Some(app) = app {
+            match msg {
+                WM_ERASEBKGND => return LRESULT(1),
+                WM_PAINT => {
+                    let mut paint = PAINTSTRUCT::default();
+                    let dc = BeginPaint(window, &mut paint);
+                    app.paint_tabs(window, dc);
+                    let _ = EndPaint(window, &paint);
+                    return LRESULT(0);
+                }
+                WM_PRINTCLIENT => {
+                    app.paint_tabs(window, HDC(wparam.0 as _));
+                    return LRESULT(0);
+                }
+                _ => {}
+            }
+        }
+        if msg == WM_NCDESTROY {
+            let _ = RemoveWindowSubclass(window, Some(tab_proc), id);
+        }
+        DefSubclassProc(window, msg, wparam, lparam)
     }
 }

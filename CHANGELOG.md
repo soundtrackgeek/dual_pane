@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0] - 2026-11-18
+
+### Added
+
+- Added independent folder tabs in each pane with keyboard shortcuts and per-tab Back and Forward history.
+- Added named folder pairs with a picker that previews both paths before opening them.
+- Added startup restore for both tab strips and their active tabs, filters, and view positions. Existing 0.2.0 workspaces open with one tab per pane.
+
 ## [0.2.0] - 2026-11-18
 
 ### Added

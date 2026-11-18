@@ -11,7 +11,7 @@ cargo build --release --locked
 .\target\release\dual-pane.exe
 ```
 
-The first launch opens your user profile on the left and the working directory on the right. On later launches the app restores both paths, per-pane sorting, the divider, and the theme from your Windows user settings. Pass up to two paths to override the saved paths for launch. Quote paths that contain spaces.
+The first launch opens your user profile on the left and the working directory on the right. Later launches restore the open tabs and selected tab in each pane, saved folder pairs, the divider, and the theme from your Windows user settings. Pass up to two paths to override the active tabs for launch. Quote paths that contain spaces.
 
 ```powershell
 .\target\release\dual-pane.exe "$env:USERPROFILE\Documents" "D:\Archive"
@@ -24,6 +24,9 @@ Add `--no-workspace` for a temporary session that starts with the defaults and l
 | Shortcut | Action |
 | --- | --- |
 | Tab / Shift+Tab | Switch to the opposite pane |
+| Ctrl+T / Ctrl+W | Duplicate the active tab / close the active tab |
+| Ctrl+Tab / Ctrl+Shift+Tab | Cycle tabs forward / backward in the active pane |
+| Alt+Left / Alt+Right | Go back / forward in the active tab |
 | Ctrl+L | Select the active pane's folder path for editing |
 | Enter | Go to the edited path, return to the list from the filter, or open the focused item |
 | Esc | Restore the current path while editing, or clear the focused filter and return to the list |
@@ -32,6 +35,8 @@ Add `--no-workspace` for a temporary session that starts with the defaults and l
 | Ctrl+A | Select all visible rows in the active file list |
 | Ctrl+F | Focus the active pane's filename filter |
 | Ctrl+1 / Ctrl+2 / Ctrl+3 | Sort by Name / Size / Modified. Repeat to reverse direction |
+| Ctrl+P | Open the folder-pair picker |
+| Ctrl+Shift+P | Save the two visible folders as a named pair |
 | F2 | Rename the selected file or folder |
 | F5 / F6 | Copy / move the selection to the opposite pane after confirmation |
 | F7 | Create a folder in the active pane |
@@ -40,19 +45,29 @@ Add `--no-workspace` for a temporary session that starts with the defaults and l
 
 You can double-click a row to open it, use Ctrl or Shift to select multiple rows, and drag the divider to resize the panes. The active pane is marked above its path field. The View menu offers System, Light, and Dark themes.
 
-The lists start in folders-first natural name order. Click **Name**, **Size**, or **Modified** to sort and click the same column again to reverse the order. The filter matches any part of a filename, ignores case, and clears when you navigate to another folder. The pane footer shows the filtered count and the selected count. Rows hidden by a filter leave the selection.
+Each tab remembers its folder, sort, filter, scroll position, and focused item. A single selected item is restored when it is still visible. Reopening a tab reloads its folder. Each pane keeps at least one tab, supports up to 32 tabs, and keeps Back/Forward history for the current session.
+
+Use **Pairs…** to preview the left and right paths for a saved pair. Opening a pair navigates the two active tabs and leaves the other tabs available. The picker also lets you save or remove a pair.
+
+The lists start in folders-first natural name order. Click **Name**, **Size**, or **Modified** to sort and click the same column again to reverse the order. The filter matches any part of a filename and ignores case. New folder visits start with a clear filter. Back and Forward return to the filter for that visit. The pane footer shows the filtered count and the selected count. Rows hidden by a filter leave the selection.
 
 Both local and UNC paths work for browsing. Dual Pane watches each open folder for changes and preserves the selected items and viewport when possible. An unsupported or disconnected watch leaves **Ctrl+R** available for a manual refresh. If Windows cannot recycle the selection, it presents a separate warning before a permanent deletion.
 
 ## Implementation
 
-Dual Pane uses Rust, Microsoft's `windows` crate, and Win32 common controls. Each pane uses a virtual list view and background folder enumeration with a bounded work queue. Large listings show an early batch while the complete folder is read and sorted. Rows use shared Windows icons and format their metadata on demand. Filename filtering and sorting run on the same background workers. Folder watches use asynchronous Windows change notifications and group bursts of changes before rescanning. Copy, move, rename, and recycle use Windows Shell file operations.
+Dual Pane uses Rust, Microsoft's `windows` crate, and Win32 common controls. Each pane uses one virtual list view and one folder watcher. Inactive tabs retain navigation state. Background folder enumeration uses a bounded work queue. Large listings show an early batch while the complete folder is read and sorted. Rows use shared Windows icons and format their metadata on demand. Filename filtering and sorting run on the same background workers. Folder watches use asynchronous Windows change notifications and group bursts of changes before rescanning. Copy, move, rename, and recycle use Windows Shell file operations.
 
 ```powershell
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
+
+## 0.3.0 verification
+
+The x64 release build was retested on the same Windows 11 PC. Across five launches with a warm filesystem cache, the median was **93 ms to first rows** and **268 ms to all 100,000 rows**. The private working set was **10.88 MiB with two tabs** and **11.10 MiB with eleven tabs**. Four of those tabs had opened the large folder in turn. Windows recorded **0 ms of process CPU time over 10 seconds at idle**.
+
+The desktop test covered a 0.2.0 workspace upgrade, Back/Forward, saving and reopening a folder pair, and restart restore. It also switched away from an unavailable UNC tab, copied a file to the visible destination, and returned to the original tab and its previous selection, filter, and scroll position.
 
 ## 0.2.0 verification
 

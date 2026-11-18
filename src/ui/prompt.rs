@@ -32,34 +32,82 @@ pub fn name(
         select_end,
         value: RefCell::new(None),
     };
+    if let Err(error) = show_dialog(
+        owner,
+        [244, 71],
+        Some(dialog_proc),
+        LPARAM((&state as *const Prompt) as isize),
+    ) {
+        message(
+            owner,
+            "Could not open name dialog",
+            &error.message(),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+    state.value.into_inner()
+}
+
+pub(super) fn show_dialog(
+    owner: HWND,
+    [cx, cy]: [i16; 2],
+    procedure: DLGPROC,
+    state: LPARAM,
+) -> Result<isize> {
     let template = Template {
         dialog: DLGTEMPLATE {
             style: (WS_POPUP | WS_CAPTION | WS_SYSMENU).0 | (DS_CENTER | DS_MODALFRAME) as u32,
-            cx: 244,
-            cy: 71,
+            cx,
+            cy,
             ..Default::default()
         },
         menu_class_title: [0; 3],
     };
     let result = unsafe {
-        let instance = HINSTANCE(GetModuleHandleW(None).ok()?.0);
+        let instance = HINSTANCE(GetModuleHandleW(None)?.0);
         DialogBoxIndirectParamW(
             Some(instance),
             &template.dialog,
             Some(owner),
-            Some(dialog_proc),
-            LPARAM((&state as *const Prompt) as isize),
+            procedure,
+            state,
         )
     };
     if result == -1 {
-        message(
-            owner,
-            "Could not open name dialog",
-            &windows::core::Error::from_thread().message(),
-            MB_OK | MB_ICONERROR,
-        );
+        return Err(windows::core::Error::from_thread());
     }
-    state.value.into_inner()
+    Ok(result)
+}
+
+pub(super) type Control = (PCWSTR, PCWSTR, WINDOW_EX_STYLE, WINDOW_STYLE, u16, [i32; 4]);
+
+pub(super) fn add_control(dialog: HWND, font: HFONT, control: Control) -> Result<HWND> {
+    let (class, text, ex_style, style, id, [left, top, right, bottom]) = control;
+    let mut bounds = RECT {
+        left,
+        top,
+        right,
+        bottom,
+    };
+    unsafe {
+        MapDialogRect(dialog, &mut bounds)?;
+        let window = CreateWindowExW(
+            ex_style,
+            class,
+            text,
+            WS_CHILD | WS_VISIBLE | style,
+            bounds.left,
+            bounds.top,
+            bounds.right - bounds.left,
+            bounds.bottom - bounds.top,
+            Some(dialog),
+            Some(HMENU(id as usize as _)),
+            None,
+            None,
+        )?;
+        send(window, WM_SETFONT, font.0 as usize, 0);
+        Ok(window)
+    }
 }
 
 fn initialize(dialog: HWND, state: &Prompt) -> Result<()> {
@@ -101,33 +149,12 @@ fn initialize(dialog: HWND, state: &Prompt) -> Result<()> {
             [183, 46, 235, 62],
         ),
     ];
-    for (class, text, ex_style, style, id, [left, top, right, bottom]) in controls {
-        let mut bounds = RECT {
-            left,
-            top,
-            right,
-            bottom,
-        };
-        unsafe {
-            MapDialogRect(dialog, &mut bounds)?;
-            let window = CreateWindowExW(
-                ex_style,
-                class,
-                text,
-                WS_CHILD | WS_VISIBLE | style,
-                bounds.left,
-                bounds.top,
-                bounds.right - bounds.left,
-                bounds.bottom - bounds.top,
-                Some(dialog),
-                Some(HMENU(id as usize as _)),
-                None,
-                None,
-            )?;
-            send(window, WM_SETFONT, state.font.0 as usize, 0);
-            if id == INPUT {
-                send(window, EM_SETLIMITTEXT, 255, 0);
-                send(window, EM_SETSEL, 0, state.select_end as isize);
+    for control in controls {
+        let window = add_control(dialog, state.font, control)?;
+        if control.4 == INPUT {
+            send(window, EM_SETLIMITTEXT, 255, 0);
+            send(window, EM_SETSEL, 0, state.select_end as isize);
+            unsafe {
                 let _ = SetFocus(Some(window));
             }
         }

@@ -1,13 +1,13 @@
 use super::*;
 
-use crate::directory::{Column, Sort};
+use navigation::{MAX_PAIRS, MAX_TABS, SavedPair, Tab};
 
 const KEY: PCWSTR = w!("Software\\DualPane");
 const VALUE: PCWSTR = w!("Workspace");
 
 pub struct Workspace {
-    pub paths: [PathBuf; 2],
-    pub sort: [Sort; 2],
+    pub panes: [Tabs; 2],
+    pub pairs: Vec<SavedPair>,
     pub split: f32,
     pub theme: Theme,
     pub persist: bool,
@@ -20,8 +20,8 @@ impl Default for Workspace {
             .map(PathBuf::from)
             .unwrap_or_else(|| current.clone());
         Self {
-            paths: [home, current],
-            sort: [Sort::default(); 2],
+            panes: [home, current].map(|path| Tabs::single(path, Sort::default())),
+            pairs: Vec::new(),
             split: 0.5,
             theme: Theme::System,
             persist: true,
@@ -49,8 +49,10 @@ impl Workspace {
             Self::default()
         };
         workspace.persist = persist;
-        for (path, override_path) in workspace.paths.iter_mut().zip(paths) {
-            *path = override_path;
+        for (pane, override_path) in workspace.panes.iter_mut().zip(paths) {
+            if let Ok(path) = std::path::absolute(override_path) {
+                pane.current_mut().location = Location::new(path);
+            }
         }
         workspace
     }
@@ -70,7 +72,7 @@ impl Workspace {
             .ok()
             .ok()?;
         }
-        if size == 0 || size > 140_000 || size % 2 != 0 {
+        if size == 0 || size > 9 * 1024 * 1024 || size % 2 != 0 {
             return None;
         }
         let mut data = vec![0_u16; size as usize / 2];
@@ -119,19 +121,37 @@ impl Workspace {
             Theme::Light => "light",
             Theme::Dark => "dark",
         };
-        let position = self.split.to_string();
-        let sort_code =
-            |sort: Sort| (sort.column.index() * 2 + usize::from(sort.descending)).to_string();
-        let mut data = wide("v1");
-        for entry in [
-            wide(theme),
-            wide(position),
-            wide(sort_code(self.sort[0])),
-            wide(sort_code(self.sort[1])),
-            wide(&self.paths[0]),
-            wide(&self.paths[1]),
-        ] {
-            data.extend(entry);
+        let mut data = wide("v2");
+        data.extend(wide(theme));
+        data.extend(wide(self.split.to_string()));
+        // REG_MULTI_SZ uses an empty string as its terminator. Prefix each
+        // record field so empty filters and missing row anchors round trip.
+        let mut write = |field: &[u16]| {
+            data.push(b'+' as u16);
+            data.extend_from_slice(field);
+            data.push(0);
+        };
+        for pane in &self.panes {
+            write(&digits(pane.items.len()));
+            write(&digits(pane.active));
+            for tab in &pane.items {
+                let sort = tab.sort.column.index() * 2 + usize::from(tab.sort.descending);
+                write(&digits(sort));
+                let place = &tab.location;
+                write(&units(&place.path));
+                write(&place.query);
+                write(&digits(place.anchors.top_index));
+                write(&place.anchors.top);
+                write(&place.anchors.focused);
+                write(&place.anchors.selected);
+            }
+        }
+        write(&digits(self.pairs.len()));
+        for pair in &self.pairs {
+            write(&units(&pair.name));
+            for folder in &pair.paths {
+                write(&units(folder));
+            }
         }
         data.push(0);
         data
@@ -139,45 +159,124 @@ impl Workspace {
 
     fn decode(data: &[u16]) -> Option<Self> {
         let mut parts = data.split(|&unit| unit == 0);
-        if parts.next()? != [b'v' as u16, b'1' as u16] {
-            return None;
-        }
+        let version = String::from_utf16(parts.next()?).ok()?;
         let theme = match String::from_utf16(parts.next()?).ok()?.as_str() {
             "system" => Theme::System,
             "light" => Theme::Light,
             "dark" => Theme::Dark,
             _ => return None,
         };
-        let parse = |part: &[u16]| String::from_utf16(part).ok()?.parse::<usize>().ok();
-        let position = String::from_utf16(parts.next()?)
+        let split = String::from_utf16(parts.next()?)
             .ok()?
             .parse::<f32>()
             .ok()?;
-        if !position.is_finite() {
+        if !split.is_finite() {
             return None;
         }
-        let sort = |code: usize| {
-            Some(Sort {
-                column: Column::from_index(code / 2)?,
-                descending: !code.is_multiple_of(2),
-            })
+        let (panes, pairs) = match version.as_str() {
+            "v1" => {
+                let left = decode_sort(parts.next()?)?;
+                let right = decode_sort(parts.next()?)?;
+                (
+                    [
+                        Tabs::single(folder(parts.next()?)?, left),
+                        Tabs::single(folder(parts.next()?)?, right),
+                    ],
+                    Vec::new(),
+                )
+            }
+            "v2" => {
+                let mut read = || parts.next()?.strip_prefix(&[b'+' as u16]);
+                let panes = [decode_tabs(&mut read)?, decode_tabs(&mut read)?];
+                let count = number(read()?)?;
+                if count > MAX_PAIRS {
+                    return None;
+                }
+                let mut pairs = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let name = read()?;
+                    if name.is_empty() || name.len() > 255 {
+                        return None;
+                    }
+                    pairs.push(SavedPair {
+                        name: OsString::from_wide(name),
+                        paths: [folder(read()?)?, folder(read()?)?],
+                    });
+                }
+                (panes, pairs)
+            }
+            _ => return None,
         };
-        let sort = [sort(parse(parts.next()?)?)?, sort(parse(parts.next()?)?)?];
-        let paths = [
-            PathBuf::from(OsString::from_wide(parts.next()?)),
-            PathBuf::from(OsString::from_wide(parts.next()?)),
-        ];
-        if paths.iter().any(|path| !path.is_absolute()) {
-            return None;
-        }
         Some(Self {
-            paths,
-            sort,
-            split: position.clamp(0.30, 0.70),
+            panes,
+            pairs,
+            split: split.clamp(0.30, 0.70),
             theme,
             persist: true,
         })
     }
+}
+
+fn units(value: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
+    value.as_ref().encode_wide().collect()
+}
+
+fn digits(value: usize) -> Vec<u16> {
+    value.to_string().encode_utf16().collect()
+}
+
+fn number(value: &[u16]) -> Option<usize> {
+    String::from_utf16(value).ok()?.parse().ok()
+}
+
+fn folder(value: &[u16]) -> Option<PathBuf> {
+    let path = PathBuf::from(OsString::from_wide(value));
+    (value.len() <= 32767 && path.is_absolute()).then_some(path)
+}
+
+fn decode_sort(value: &[u16]) -> Option<Sort> {
+    let code = number(value)?;
+    Some(Sort {
+        column: Column::from_index(code / 2)?,
+        descending: !code.is_multiple_of(2),
+    })
+}
+
+fn decode_tabs<'a>(read: &mut impl FnMut() -> Option<&'a [u16]>) -> Option<Tabs> {
+    let count = number(read()?)?;
+    let active = number(read()?)?;
+    if count > MAX_TABS || active >= count {
+        return None;
+    }
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        let sort = decode_sort(read()?)?;
+        let path = folder(read()?)?;
+        let query = read()?;
+        let top_index = number(read()?)?;
+        let [top, focused, selected] = [read()?, read()?, read()?];
+        if [query, top, focused, selected]
+            .into_iter()
+            .any(|field| field.len() > 255)
+        {
+            return None;
+        }
+        let anchors = Anchors {
+            top_index,
+            top: top.to_vec(),
+            focused: focused.to_vec(),
+            selected: selected.to_vec(),
+        };
+        items.push(Tab::new(
+            Location {
+                path,
+                query: query.to_vec(),
+                anchors,
+            },
+            sort,
+        ));
+    }
+    Some(Tabs { items, active })
 }
 
 #[cfg(test)]
@@ -185,29 +284,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workspace_preserves_unicode_and_rejects_invalid_data() {
-        let workspace = Workspace {
-            paths: [
-                PathBuf::from(r"C:\År"),
-                PathBuf::from(r"\\server\share\日本語"),
-            ],
-            sort: [
-                Sort::default(),
-                Sort {
-                    column: Column::Modified,
-                    descending: true,
-                },
-            ],
-            split: 0.615,
-            theme: Theme::Dark,
-            persist: true,
-        };
-        let data = workspace.encode();
+    fn migrates_milestone_two_workspace_to_one_tab_per_pane() {
+        let old = [
+            "v1",
+            "dark",
+            "0.615",
+            "0",
+            "5",
+            r"C:\År",
+            r"\\server\share\日本語",
+        ];
+        let data = old
+            .into_iter()
+            .flat_map(wide)
+            .chain([0])
+            .collect::<Vec<_>>();
         let saved = Workspace::decode(&data).unwrap();
-        assert_eq!(saved.paths, workspace.paths);
-        assert!(saved.sort == workspace.sort);
-        assert_eq!(saved.split, workspace.split);
+        assert_eq!(saved.panes[0].current().location.path, Path::new(r"C:\År"));
+        assert_eq!(
+            saved.panes[1].current().location.path,
+            Path::new(r"\\server\share\日本語")
+        );
+        assert!(saved.panes[1].current().sort.descending);
+        assert_eq!(saved.split, 0.615);
         assert!(matches!(saved.theme, Theme::Dark));
         assert!(Workspace::decode(&data[..5]).is_none());
+    }
+
+    #[test]
+    fn restores_active_tabs_and_saved_pairs_with_unicode_and_empty_fields() {
+        let mut workspace = Workspace::default();
+        let folder = PathBuf::from(r"C:\År");
+        workspace.panes[0] = Tabs::single(folder.clone(), Sort::default());
+        assert!(workspace.panes[0].open());
+        let tab = workspace.panes[0].current_mut();
+        tab.location.path = PathBuf::from(r"C:\日本語");
+        tab.location.query = units("æ");
+        tab.location.anchors.top = units("æ.txt");
+        tab.location.anchors.top_index = 8;
+        workspace.pairs.push(SavedPair {
+            name: OsString::from("Å → 日本語"),
+            paths: [folder, tab.location.path.clone()],
+        });
+        let data = workspace.encode();
+        let saved = Workspace::decode(&data).unwrap();
+        assert_eq!(saved.panes[0].items.len(), 2);
+        assert_eq!(saved.panes[0].active, 1);
+        assert_eq!(saved.panes[0].current().location.query, units("æ"));
+        assert_eq!(
+            saved.panes[0].current().location.anchors.top,
+            units("æ.txt")
+        );
+        assert_eq!(saved.panes[0].current().location.anchors.top_index, 8);
+        assert!(saved.panes[0].items[0].location.query.is_empty());
+        assert_eq!(saved.pairs[0].name, "Å → 日本語");
+        assert_eq!(saved.pairs[0].paths, workspace.pairs[0].paths);
     }
 }
