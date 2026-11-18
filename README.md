@@ -1,6 +1,12 @@
-# Dual Pane
+# Filehelm
 
 A keyboard-first file manager for Windows 11. Browse, search, compare, and organize folders side by side.
+
+## Install on Windows 11
+
+Download the Windows x64 MSI or portable ZIP from [GitHub Releases](https://github.com/soundtrackgeek/dual_pane/releases). Run the MSI to install Filehelm for your Windows account and add a Start menu shortcut. To run without installing, extract the portable ZIP and open `filehelm.exe`.
+
+Both packages use the same per-user workspace and Undo history, including existing data from builds under the Dual Pane name. Installing a newer MSI upgrades the app in place. Uninstalling through Windows Settings keeps your workspace and Undo history. The release candidate is unsigned, so Windows may prompt before opening it.
 
 ## Build and run
 
@@ -8,16 +14,18 @@ Build with stable Rust for Windows, using the MSVC target and Visual Studio Buil
 
 ```powershell
 cargo build --release --locked
-.\target\release\dual-pane.exe
+.\target\release\filehelm.exe
 ```
 
 The first launch opens your user profile on the left and the working directory on the right. Later launches restore the open tabs and selected tab in each pane, saved folder pairs, the divider, and the theme from your Windows user settings. Pass up to two paths to override the active tabs for launch. Quote paths that contain spaces.
 
 ```powershell
-.\target\release\dual-pane.exe "$env:USERPROFILE\Documents" "D:\Archive"
+.\target\release\filehelm.exe "$env:USERPROFILE\Documents" "D:\Archive"
 ```
 
 Add `--no-workspace` for a temporary session that starts with the defaults and leaves the saved workspace alone.
+
+To build the installer, portable archive, and SHA-256 checksums locally, run `./scripts/package-windows.ps1` in PowerShell 7 with the .NET 10 SDK installed. Output goes to `target/dist`. The GitHub Actions workflow builds, tests, and publishes packages for each Cargo version bump pushed to `master`. Versions with a prerelease suffix appear under GitHub prereleases.
 
 ## Browse and organize files
 
@@ -58,7 +66,7 @@ Use **Pairs…** to preview the left and right paths for a saved pair. Opening a
 
 The lists start in folders-first natural name order. Click **Name**, **Size**, or **Modified** to sort and click the same column again to reverse the order. The filter matches any part of a filename and ignores case. New folder visits start with a clear filter. Back and Forward return to the filter for that visit. The pane footer shows the filtered count and the selected count. Rows hidden by a filter leave the selection.
 
-Both local and UNC paths work for browsing. Dual Pane watches each open folder for changes and preserves the selected items and viewport when possible. An unsupported or disconnected watch leaves **Ctrl+R** available for a manual refresh. If Windows cannot recycle the selection, it presents a separate warning before a permanent deletion.
+Both local and UNC paths work for browsing. Filehelm watches each open folder for changes and preserves the selected items and viewport when possible. An unsupported or disconnected watch leaves **Ctrl+R** available for a manual refresh. If Windows cannot recycle the selection, it presents a separate warning before a permanent deletion.
 
 ## Undo and Operation History
 
@@ -70,9 +78,9 @@ The most recent 24 operations and up to 20,000 file changes are kept within a 16
 
 ## Windows clipboard and drag-and-drop
 
-Select files or folders in a disk pane and press **Ctrl+C** or **Ctrl+X**. Paste with **Ctrl+V** in another pane, tab, or File Explorer. You can also copy or cut in File Explorer and paste into an open disk pane. Cut items are dimmed while Dual Pane owns the cut clipboard. The path and filter fields use ordinary text clipboard shortcuts.
+Select files or folders in a disk pane and press **Ctrl+C** or **Ctrl+X**. Paste with **Ctrl+V** in another pane, tab, or File Explorer. You can also copy or cut in File Explorer and paste into an open disk pane. Cut items are dimmed while Filehelm owns the cut clipboard. The path and filter fields use ordinary text clipboard shortcuts.
 
-Drag files or folders from File Explorer into a file list or between Dual Pane lists. The highlighted pane shows the destination and the proposed action. A drop copies by default when copying is available. Hold **Shift** to move or **Ctrl** to copy. The destination is the highlighted pane's open folder.
+Drag files or folders from File Explorer into a file list or between Filehelm lists. The highlighted pane shows the destination and the proposed action. A drop copies by default when copying is available. Hold **Shift** to move or **Ctrl** to copy. The destination is the highlighted pane's open folder.
 
 Paste and drop capture the destination and queue the work in **Transfers**. Windows handles conflicts. Completed items remain in place when you cancel, and the panel reports each item. A fully completed clipboard move clears that cut only if the clipboard still holds the same data. Clipboard and drop support applies to Windows filesystem paths. Use **F5** to extract ZIP members.
 
@@ -130,13 +138,19 @@ The queue and its transfer reports belong to the current app session. Confirmed,
 
 ## Implementation
 
-Dual Pane uses Rust, Microsoft's `windows` crate, and Win32 common controls. Each pane uses one virtual list view and one folder watcher. Inactive tabs retain navigation state. Background folder enumeration uses a bounded work queue. Large listings show an early batch while the complete folder is read and sorted. Rows use shared Windows icons and format their metadata on demand. Filename filtering and sorting run on the same background workers. Folder watches use asynchronous Windows change notifications and group bursts of changes before rescanning. Copy, move, single-item rename, and recycle use Windows Shell file operations. Batch Rename uses native file handles and a virtual preview list.
+Filehelm uses Rust, Microsoft's `windows` crate, and Win32 common controls. Each pane uses one virtual list view and one folder watcher. Inactive tabs retain navigation state. Background folder enumeration uses a bounded work queue. Large listings show an early batch while the complete folder is read and sorted. Rows use shared Windows icons and format their metadata on demand. Filename filtering and sorting run on the same background workers. Folder watches use asynchronous Windows change notifications and group bursts of changes before rescanning. Copy, move, single-item rename, and recycle use Windows Shell file operations. Batch Rename uses native file handles and a virtual preview list.
 
 ```powershell
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
+
+## Filehelm 1.0 release candidate verification
+
+On Windows 11 x64, five warm-cache runs opened a 100,000-entry local folder in a median of **87 ms to first rows** and **123 ms to the full list**. A 100,000-entry ZIP64 populated in a median of **123 ms** after pressing Enter. Median settled private working set was **10.9 MiB** for either listing. The ZIP's median sampled peak was **30.3 MiB**. Each listing recorded **0 ms** of process CPU time in a separate 10-second idle sample. Switching to the local pane took **2.7 ms** while the opposite pane waited for an unavailable loopback UNC path.
+
+Windows desktop checks covered a clean per-user install, an in-place upgrade from a test MSI built with the 0.11.0 executable, and uninstall. Existing workspace and Undo data were preserved. The portable ZIP and MSI contained the same executable. Desktop checks also covered light and dark list colors, keyboard navigation, copy, move, Undo, and ZIP extraction. The Win32 layout test sends simulated DPI changes at 100%, 150%, and 200%, including narrow panes.
 
 ## 0.11.0 verification
 
@@ -146,7 +160,7 @@ In a 3,500-file move canceled after work started, Operation History offered only
 
 ## 0.10.0 verification
 
-Windows desktop checks covered File Explorer copy and cut in both directions, Unicode paths and folder transfers, native cut highlighting, an Explorer drop into Dual Pane, and both copy and Shift-move drags between panes.
+Windows desktop checks covered File Explorer copy and cut in both directions, Unicode paths and folder transfers, native cut highlighting, an Explorer drop into Filehelm, and both copy and Shift-move drags between panes.
 
 A mixed-source paste kept its destination after switching tabs and preserved clipboard data copied while the job waited. Canceling a 7,000-file clipboard move left the completed files in the destination and retained the remaining originals and the cut clipboard.
 

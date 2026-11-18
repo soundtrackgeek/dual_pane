@@ -1,8 +1,11 @@
 [package]
-name = "dual-pane"
-version = "0.11.0"
+name = "filehelm"
+version = "1.0.0-rc.1"
 edition = "2024"
 description = "A keyboard-first dual-pane file manager for Windows"
+
+[build-dependencies]
+winresource = { version = "0.1.34", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 zip = { version = "9.7.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }

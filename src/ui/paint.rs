@@ -324,12 +324,18 @@ impl App {
                 right - left - 2,
                 bounds.bottom - bounds.top - s(166),
             );
-            let slim = right - left < s(305);
-            let size = if slim { s(61) } else { s(82) };
-            let modified = if slim { s(122) } else { s(148) };
             // Reserve the scrollbar width so a newly populated list keeps its columns stable.
             let scroll = unsafe { GetSystemMetricsForDpi(SM_CXVSCROLL, self.dpi.get()) };
-            let name = (right - left - size - modified - scroll - 3).max(s(55));
+            let column_space = (right - left - scroll - 3).max(0);
+            let (size, modified) = if right - left < s(305) {
+                (
+                    (column_space * 23 / 100).min(s(61)),
+                    (column_space * 40 / 100).min(s(122)),
+                )
+            } else {
+                (s(82), s(148))
+            };
+            let name = column_space - size - modified;
             for (column, width) in [name, size, modified].into_iter().enumerate() {
                 send(pane.list, LVM_SETCOLUMNWIDTH, column, width as isize);
             }

@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.0.0-rc.1] - 2026-11-18
+
+### Added
+
+- Added the Filehelm Windows x64 per-user MSI, Start menu shortcut, and portable ZIP.
+- Added version-triggered Windows package verification and GitHub Releases publication.
+
+### Changed
+
+- Renamed the application to Filehelm and added a native icon and Windows version information.
+
+### Fixed
+
+- Improved file-list column sizing in narrow panes and validated the main layout at 100%, 150%, and 200% scaling.
+
 ## [0.11.0] - 2026-11-18
 
 ### Added

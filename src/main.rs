@@ -1,7 +1,7 @@
 #![windows_subsystem = "windows"]
 
 #[cfg(not(windows))]
-compile_error!("Dual Pane requires Windows.");
+compile_error!("Filehelm requires Windows.");
 
 #[cfg(windows)]
 mod archive;

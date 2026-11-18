@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Filehelm" Manufacturer="Filehelm" Version="$(var.MsiVersion)"
+           UpgradeCode="D0A71DAB-4B4C-46F9-B244-9F2097D9B4E7" Scope="perUser">
+    <MajorUpgrade Schedule="afterInstallInitialize"
+                  DowngradeErrorMessage="A newer version of Filehelm is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Icon Id="FilehelmIcon" SourceFile="$(var.AppIcon)" />
+    <Property Id="ARPPRODUCTICON" Value="FilehelmIcon" />
+    <Property Id="ARPCOMMENTS" Value="Filehelm $(var.ReleaseVersion) for Windows 11" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/soundtrackgeek/dual_pane" />
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="UserPrograms" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Filehelm">
+          <Component Id="Application" Guid="C7479B62-1DC9-419C-BC8F-BB4C02DAECF7" Bitness="always64">
+            <File Id="FilehelmExe" Name="filehelm.exe" Source="$(var.Executable)" />
+            <RegistryValue Root="HKCU" Key="Software\Filehelm\Installation"
+                           Name="Directory" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+            <RemoveFolder Id="RemoveInstallation" On="uninstall" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartShortcut" Guid="95C21F9F-332F-4746-AAEA-A59EB2E16D02" Bitness="always64">
+        <Shortcut Id="StartFilehelm" Name="Filehelm" Description="Filehelm file manager"
+                  Target="[#FilehelmExe]" WorkingDirectory="INSTALLFOLDER" Icon="FilehelmIcon" />
+        <RegistryValue Root="HKCU" Key="Software\Filehelm\Installation"
+                       Name="StartShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+    <Feature Id="Filehelm" Title="Filehelm" Level="1">
+      <ComponentRef Id="Application" />
+      <ComponentRef Id="StartShortcut" />
+    </Feature>
+  </Package>
+</Wix>

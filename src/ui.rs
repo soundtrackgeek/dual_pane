@@ -269,7 +269,7 @@ impl Drop for App {
 pub fn startup_error(error: &str) {
     message(
         HWND::default(),
-        "Dual Pane could not start",
+        "Filehelm could not start",
         error,
         MB_OK | MB_ICONERROR,
     );
@@ -363,7 +363,8 @@ fn create_window() -> Result<HWND> {
         let class = w!("DualPaneWindow");
         let wc = WNDCLASSW {
             hCursor: LoadCursorW(None, IDC_ARROW)?,
-            hIcon: LoadIconW(None, IDI_APPLICATION)?,
+            hIcon: LoadIconW(Some(instance), PCWSTR(1_usize as _))
+                .or_else(|_| LoadIconW(None, IDI_APPLICATION))?,
             hInstance: instance,
             lpfnWndProc: Some(window_proc),
             lpszClassName: class,
@@ -376,7 +377,7 @@ fn create_window() -> Result<HWND> {
         CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             class,
-            w!("Dual Pane"),
+            w!("Filehelm"),
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -2158,7 +2159,7 @@ unsafe extern "system" fn window_proc(
                     message(
                         window,
                         "File operation in progress",
-                        "Finish or cancel the Windows file operation before closing Dual Pane.",
+                        "Finish or cancel the Windows file operation before closing Filehelm.",
                         MB_OK | MB_ICONINFORMATION,
                     );
                     return LRESULT(0);
@@ -2170,7 +2171,7 @@ unsafe extern "system" fn window_proc(
                             window,
                             "Waiting transfers",
                             &format!(
-                                "Close Dual Pane and discard {} waiting transfers?",
+                                "Close Filehelm and discard {} waiting transfers?",
                                 grouped(waiting as u64)
                             ),
                             MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
@@ -2221,36 +2222,42 @@ mod tests {
         let _apartment = shell::Apartment::enter()?;
         let window = create_window()?;
         let app = attach(window, &Workspace::default())?;
-        let target_dpi = 144;
-        let size = RECT {
-            left: 40,
-            top: 40,
-            right: 1600,
-            bottom: 980,
-        };
-        let mut paths = [RECT::default(); 2];
-        let mut content = [RECT::default(); 2];
-        unsafe {
-            SendMessageW(
-                window,
-                WM_DPICHANGED,
-                Some(WPARAM(target_dpi | (target_dpi << 16))),
-                Some(LPARAM((&size as *const RECT) as isize)),
-            );
-            for index in 0..2 {
-                GetWindowRect(app.panes[index].path, &mut paths[index])?;
-                GetWindowRect(app.panes[index].list, &mut content[index])?;
+        for dpi in [96, 144, 192] {
+            let size = RECT {
+                left: 40,
+                top: 40,
+                right: 40 + 800 * dpi / 96,
+                bottom: 40 + 560 * dpi / 96,
+            };
+            for split in [0.30, 0.50, 0.70] {
+                app.split.set(split);
+                let mut lists = [RECT::default(); 2];
+                unsafe {
+                    SendMessageW(
+                        window,
+                        WM_DPICHANGED,
+                        Some(WPARAM((dpi | (dpi << 16)) as usize)),
+                        Some(LPARAM((&size as *const RECT) as isize)),
+                    );
+                    for (pane, list) in app.panes.iter().zip(&mut lists) {
+                        let mut path = RECT::default();
+                        GetWindowRect(pane.path, &mut path)?;
+                        GetWindowRect(pane.list, list)?;
+                        assert_eq!(path.bottom - path.top, 20 * dpi / 96);
+                        assert!(path.right - path.left >= 60 * dpi / 96);
+                        let widths = [0, 1, 2]
+                            .map(|column| send(pane.list, LVM_GETCOLUMNWIDTH, column, 0) as i32);
+                        assert!(widths.iter().all(|width| *width > 0));
+                        assert!(widths.iter().sum::<i32>() <= list.right - list.left);
+                    }
+                }
+                assert_eq!(app.dpi.get(), dpi as u32);
+                assert!(lists[0].right < lists[1].left);
+                assert_eq!(lists[0].top, lists[1].top);
+                assert!(lists[0].bottom - lists[0].top > 250 * dpi / 96);
             }
-            DestroyWindow(window)?;
         }
-        assert_eq!(app.dpi.get(), target_dpi as u32);
-        for path in paths {
-            assert_eq!(path.bottom - path.top, 30);
-            assert!(path.right - path.left > 480);
-        }
-        assert!(content[0].right < content[1].left);
-        assert_eq!(content[0].top, content[1].top);
-        assert!(content[0].bottom - content[0].top > 500);
+        unsafe { DestroyWindow(window)? };
         Ok(())
     }
 }
