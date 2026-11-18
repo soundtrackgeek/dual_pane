@@ -2254,7 +2254,14 @@ mod tests {
                 assert_eq!(app.dpi.get(), dpi as u32);
                 assert!(lists[0].right < lists[1].left);
                 assert_eq!(lists[0].top, lists[1].top);
-                assert!(lists[0].bottom - lists[0].top > 250 * dpi / 96);
+                let mut client = RECT::default();
+                unsafe { GetClientRect(window, &mut client)? };
+                let expected_height =
+                    client.bottom - app.scale(12) - app.scale(59) - app.scale(166);
+                assert!(expected_height > 0);
+                for list in lists {
+                    assert_eq!(list.bottom - list.top, expected_height);
+                }
             }
         }
         unsafe { DestroyWindow(window)? };
