@@ -1,7 +1,6 @@
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 use windows::{
@@ -13,21 +12,17 @@ use windows::{
             CoUninitialize,
         },
         UI::Shell::{
-            FOF_NOCONFIRMMKDIR, FOF_WANTNUKEWARNING, FOFX_ADDUNDORECORD, FOFX_RECYCLEONDELETE,
-            FileOperation, IFileOperation, IShellItem, SHCreateItemFromParsingName, SHFILEINFOW,
-            SHGFI_SMALLICON, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGSI_SYSICONINDEX,
-            SHGetFileInfoW, SHGetStockIconInfo, SHSTOCKICONINFO, SIID_DOCNOASSOC, SIID_FOLDER,
-            ShellExecuteW,
+            FOF_WANTNUKEWARNING, FOFX_ADDUNDORECORD, FOFX_RECYCLEONDELETE, FileOperation,
+            IFileOperation, IShellItem, SHCreateItemFromParsingName, SHFILEINFOW, SHGFI_SMALLICON,
+            SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGSI_SYSICONINDEX, SHGetFileInfoW,
+            SHGetStockIconInfo, SHSTOCKICONINFO, SIID_DOCNOASSOC, SIID_FOLDER, ShellExecuteW,
         },
         UI::WindowsAndMessaging::SW_SHOWNORMAL,
     },
     core::{PCWSTR, Result, w},
 };
 
-use crate::{
-    compare::{Comparison, Plan},
-    directory::wide,
-};
+use crate::directory::wide;
 
 #[derive(Clone, Copy)]
 pub enum Transfer {
@@ -63,26 +58,13 @@ impl Drop for Apartment {
     }
 }
 
-fn item(path: &Path) -> Result<IShellItem> {
+pub(crate) fn item(path: &Path) -> Result<IShellItem> {
     let text = wide(path);
     unsafe { SHCreateItemFromParsingName(PCWSTR(text.as_ptr()), None) }
 }
 
 pub enum Operation {
-    Transfer {
-        action: Transfer,
-        sources: Vec<PathBuf>,
-        destination: PathBuf,
-    },
-    ReviewedCopy {
-        comparison: Arc<Comparison>,
-        plan: Arc<Plan>,
-        destination: PathBuf,
-    },
-    Rename {
-        source: PathBuf,
-        name: OsString,
-    },
+    Rename { source: PathBuf, name: OsString },
     CreateFolder(PathBuf),
     Recycle(Vec<PathBuf>),
 }
@@ -90,8 +72,6 @@ pub enum Operation {
 impl Operation {
     pub fn verb(&self) -> &'static str {
         match self {
-            Self::Transfer { action, .. } => action.verb(),
-            Self::ReviewedCopy { .. } => "Copy",
             Self::Rename { .. } => "Rename",
             Self::CreateFolder(_) => "New folder",
             Self::Recycle(_) => "Recycle",
@@ -112,55 +92,10 @@ impl Operation {
                 CoCreateInstance(&FileOperation, None, CLSCTX_INPROC_SERVER)?;
             operation.SetOwnerWindow(HWND(owner as _))?;
             match self {
-                Self::Transfer {
-                    action,
-                    sources,
-                    destination,
-                } => {
-                    let destination = item(destination)?;
-                    operation.SetOperationFlags(FOF_NOCONFIRMMKDIR)?;
-                    for source in sources {
-                        let source = item(source)?;
-                        match action {
-                            Transfer::Copy => {
-                                operation.CopyItem(&source, &destination, PCWSTR::null(), None)?
-                            }
-                            Transfer::Move => {
-                                operation.MoveItem(&source, &destination, PCWSTR::null(), None)?
-                            }
-                        }
-                    }
-                }
                 Self::Rename { source, name } => {
                     operation.SetOperationFlags(FOFX_ADDUNDORECORD)?;
                     let name = wide(name);
                     operation.RenameItem(&item(source)?, PCWSTR(name.as_ptr()), None)?;
-                }
-                Self::ReviewedCopy {
-                    comparison,
-                    plan,
-                    destination,
-                } => {
-                    let changed = |error: std::io::Error| {
-                        windows::core::Error::new(
-                            windows::Win32::Foundation::E_FAIL,
-                            error.to_string(),
-                        )
-                    };
-                    comparison.check_roots(plan).map_err(changed)?;
-                    let folder = item(destination)?;
-                    operation.SetOperationFlags(FOFX_ADDUNDORECORD | FOF_NOCONFIRMMKDIR)?;
-                    for file in comparison.copy_items(plan) {
-                        file.check(destination).map_err(changed)?;
-                        let name = wide(file.destination_name);
-                        operation.CopyItem(
-                            &item(&file.source)?,
-                            &folder,
-                            PCWSTR(name.as_ptr()),
-                            None,
-                        )?;
-                    }
-                    comparison.check_roots(plan).map_err(changed)?;
                 }
                 Self::Recycle(sources) => {
                     operation.SetOperationFlags(
@@ -172,8 +107,10 @@ impl Operation {
                 }
                 Self::CreateFolder(_) => unreachable!(),
             }
-            operation.PerformOperations()?;
-            Ok(operation.GetAnyOperationsAborted()?.as_bool())
+            let completed = operation.PerformOperations();
+            let aborted = operation.GetAnyOperationsAborted();
+            completed?;
+            Ok(aborted?.as_bool())
         }
     }
 }

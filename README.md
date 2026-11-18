@@ -36,10 +36,11 @@ Add `--no-workspace` for a temporary session that starts with the defaults and l
 | Ctrl+F | Focus the active pane's filename filter |
 | Ctrl+1 / Ctrl+2 / Ctrl+3 | Sort by Name / Size / Modified. Repeat to reverse direction |
 | Ctrl+Shift+C | Compare the folders in the two active tabs |
+| Ctrl+J | Open the Transfers panel |
 | Ctrl+P | Open the folder-pair picker |
 | Ctrl+Shift+P | Save the two visible folders as a named pair |
 | F2 | Rename the selected file or folder |
-| F5 / F6 | Copy / move the selection to the opposite pane after confirmation |
+| F5 / F6 | Queue a confirmed copy / move to the opposite pane |
 | F7 | Create a folder in the active pane |
 | Delete | Confirm sending the selection to the Recycle Bin |
 | Alt+V | Open the View menu |
@@ -60,9 +61,19 @@ Open **View → Compare folders…** or press **Ctrl+Shift+C**. The comparison u
 
 **Compare contents** checks the bytes of selected regular-file pairs. **Same size and time** describes the metadata. **Contents equal** means the byte check passed. The byte check streams the files in bounded chunks. **Cancel work** stops after an outstanding Windows read returns.
 
-To copy a group, choose it under **Show**, click **Select shown files**, and choose **Review to left** or **Review to right**. The review shows the exact names and distinguishes new files from replacements. **Apply copy** checks both folder identities and rereads the reviewed names and metadata. It blocks a stale review and marks the affected rows when it can identify them. Use **Refresh** to compare again and review the updated selection. Windows handles any replacement confirmation during the copy.
+To copy a group, choose it under **Show**, click **Select shown files**, and choose **Review to left** or **Review to right**. The review shows the exact names and distinguishes new files from replacements. **Apply copy** checks both folder identities and rereads the reviewed names and metadata before queuing it. It blocks a stale review and marks the affected rows when it can identify them. Use **Refresh** to compare again and review the updated selection. The queued job rechecks its review when it reaches the front. Windows handles any replacement confirmation during the copy.
 
 Reviewed copy supports regular files. Name collisions, file/folder conflicts, folders, and reparse points are excluded from batch selection. File metadata and available folder notifications are used for freshness checks.
+
+## Transfers
+
+Open **Transfers** or press **Ctrl+J**. Copies, moves, and reviewed copies run in order, one job at a time. The job keeps the source names and destination captured at confirmation. Each source's metadata is checked before Windows starts the job.
+
+The panel stays open while you browse. Select a job to see its paths, Windows' progress estimate, and results for the selected top-level items. Windows shows its file conflict and progress dialogs when needed. **Pause queue** holds the next job, **Remove waiting** cancels a job before it starts, and **Cancel transfer** asks Windows to stop the active job at its next cancellation point. Completed items remain in place.
+
+**Retry verified** queues candidates from the selected job. At the front of the queue it checks the original regular file's identity and metadata and requires its destination name to be empty. Use **Open folders** to return both panes to the job's source and destination. Review unconfirmed items there before deciding whether to transfer them again.
+
+The queue and its recent history belong to the current app session. Closing the app with waiting jobs asks whether to discard them.
 
 ## Implementation
 
@@ -73,6 +84,14 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
+
+## 0.5.0 verification
+
+The Windows x64 build opened a 100,000-entry folder in a median of **91 ms to first rows** and **260 ms to the full list** over five warm-cache launches. Private working set was **10.71 MiB** with Transfers closed and **10.72 MiB** with the empty panel open. Windows recorded **0 ms** of process CPU time over 10 seconds at idle.
+
+Desktop verification covered a 384 MiB copy followed by a queued move, a pause between those jobs, destination retention through tab switches, and native Skip and Cancel outcomes. It also covered a reviewed copy that went stale while waiting, a retry of one verified untouched file, removal of a waiting job, and cancellation from the Transfers panel.
+
+A separate desktop run queued a move while a 3,500-file copy was already running. Canceling the copy after it had started preserved the reported completed items, and the queued move completed.
 
 ## 0.4.0 verification
 

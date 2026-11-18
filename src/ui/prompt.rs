@@ -54,15 +54,7 @@ pub(super) fn show_dialog(
     procedure: DLGPROC,
     state: LPARAM,
 ) -> Result<isize> {
-    let template = Template {
-        dialog: DLGTEMPLATE {
-            style: (WS_POPUP | WS_CAPTION | WS_SYSMENU).0 | (DS_CENTER | DS_MODALFRAME) as u32,
-            cx,
-            cy,
-            ..Default::default()
-        },
-        menu_class_title: [0; 3],
-    };
+    let template = dialog_template([cx, cy]);
     let result = unsafe {
         let instance = HINSTANCE(GetModuleHandleW(None)?.0);
         DialogBoxIndirectParamW(
@@ -77,6 +69,37 @@ pub(super) fn show_dialog(
         return Err(windows::core::Error::from_thread());
     }
     Ok(result)
+}
+
+pub(super) fn create_panel(
+    owner: HWND,
+    size: [i16; 2],
+    procedure: DLGPROC,
+    state: LPARAM,
+) -> Result<HWND> {
+    let template = dialog_template(size);
+    unsafe {
+        let instance = HINSTANCE(GetModuleHandleW(None)?.0);
+        CreateDialogIndirectParamW(
+            Some(instance),
+            &template.dialog,
+            Some(owner),
+            procedure,
+            state,
+        )
+    }
+}
+
+fn dialog_template([cx, cy]: [i16; 2]) -> Template {
+    Template {
+        dialog: DLGTEMPLATE {
+            style: (WS_POPUP | WS_CAPTION | WS_SYSMENU).0 | (DS_CENTER | DS_MODALFRAME) as u32,
+            cx,
+            cy,
+            ..Default::default()
+        },
+        menu_class_title: [0; 3],
+    }
 }
 
 pub(super) type Control = (PCWSTR, PCWSTR, WINDOW_EX_STYLE, WINDOW_STYLE, u16, [i32; 4]);

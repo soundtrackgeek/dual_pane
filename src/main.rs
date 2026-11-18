@@ -10,6 +10,8 @@ mod directory;
 #[cfg(windows)]
 mod shell;
 #[cfg(windows)]
+mod transfer;
+#[cfg(windows)]
 mod ui;
 #[cfg(windows)]
 mod watch;

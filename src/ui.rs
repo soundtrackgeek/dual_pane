@@ -46,6 +46,7 @@ mod navigation;
 mod paint;
 mod pairs;
 mod prompt;
+mod transfers;
 mod workspace;
 
 use navigation::{Anchors, Location, SavedPair, Tabs};
@@ -60,6 +61,7 @@ const RENAME: u16 = 105;
 const CREATE_FOLDER: u16 = 106;
 const RECYCLE: u16 = 107;
 const COMPARE: u16 = 108;
+const TRANSFERS: u16 = 109;
 const SORT_NAME: u16 = 114;
 const SORT_SIZE: u16 = 115;
 const SORT_MODIFIED: u16 = 116;
@@ -88,6 +90,8 @@ enum Event {
     Directory(Update),
     Watch(usize, usize, Notice),
     Operation(&'static str, Changes, Result<bool>),
+    TransferProgress(u64, crate::transfer::ProgressUpdate),
+    TransferFinished(u64, crate::transfer::Report),
 }
 
 struct Changes {
@@ -190,6 +194,8 @@ struct App {
     recycle: HWND,
     view: HWND,
     pairs: HWND,
+    transfer_button: HWND,
+    transfers: transfers::Transfers,
     saved_pairs: RefCell<Vec<SavedPair>>,
     menu: HMENU,
     accessibility: Option<IAccPropServices>,
@@ -259,6 +265,16 @@ pub fn run() -> Result<()> {
                 -1 => return Err(windows::core::Error::from_thread()),
                 0 => break,
                 _ => {
+                    let panel = app.transfers.window.get();
+                    if !panel.0.is_null()
+                        && (msg.hwnd == panel || IsChild(panel, msg.hwnd).as_bool())
+                    {
+                        if !IsDialogMessageW(panel, &msg).as_bool() {
+                            let _ = TranslateMessage(&msg);
+                            DispatchMessageW(&msg);
+                        }
+                        continue;
+                    }
                     if msg.message == WM_SYSKEYDOWN
                         && msg.lParam.0 & (1 << 29) != 0
                         && app.alt_key(VIRTUAL_KEY(msg.wParam.0 as u16))
@@ -283,7 +299,10 @@ fn create_window() -> Result<HWND> {
         let instance = HINSTANCE(GetModuleHandleW(None)?.0);
         let controls = INITCOMMONCONTROLSEX {
             dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES | ICC_TAB_CLASSES,
+            dwICC: ICC_LISTVIEW_CLASSES
+                | ICC_STANDARD_CLASSES
+                | ICC_TAB_CLASSES
+                | ICC_PROGRESS_CLASS,
         };
         InitCommonControlsEx(&controls).ok()?;
         let class = w!("DualPaneWindow");
@@ -587,10 +606,12 @@ impl App {
         let recycle = button(window, w!("Del   Recycle"), RECYCLE)?;
         let view = button(window, w!("View   ▾"), VIEW)?;
         let pairs = button(window, w!("Pairs…"), PAIRS)?;
+        let transfer_button = button(window, w!("Transfers"), TRANSFERS)?;
         let menu = unsafe {
             let menu = CreatePopupMenu()?;
             menu_label(menu, REFRESH, w!("&Refresh active pane\tCtrl+R"))?;
             menu_label(menu, COMPARE, w!("Compare &folders…\tCtrl+Shift+C"))?;
+            menu_label(menu, TRANSFERS, w!("&Transfers\tCtrl+J"))?;
             AppendMenuW(menu, MF_SEPARATOR, 0, None)?;
             menu_label(menu, SORT_NAME, w!("Sort by &name\tCtrl+1"))?;
             menu_label(menu, SORT_SIZE, w!("Sort by si&ze\tCtrl+2"))?;
@@ -612,6 +633,8 @@ impl App {
             recycle,
             view,
             pairs,
+            transfer_button,
+            transfers: Default::default(),
             saved_pairs: RefCell::new(workspace.pairs.clone()),
             menu,
             accessibility,
@@ -658,7 +681,8 @@ impl App {
         let origin = self.panes[source].listing.borrow();
         let ready = !self.operation_active.get() && origin.ready();
         let selected = self.panes[source].count();
-        let enabled = ready
+        let enabled = origin.ready()
+            && self.can_queue_transfer()
             && destination.complete
             && destination.error.is_none()
             && origin.path != destination.path
@@ -1183,7 +1207,7 @@ impl App {
     fn start_transfer(&self, action: Transfer) {
         let index = self.active.get();
         let pane = &self.panes[index];
-        if self.operation_active.get() || !pane.listing.borrow().ready() {
+        if !self.can_queue_transfer() || !pane.listing.borrow().ready() {
             return;
         }
         let destination = {
@@ -1193,7 +1217,15 @@ impl App {
             }
             target.path.clone()
         };
-        let (folder, sources) = pane.selected_paths();
+        let (folder, sources) = {
+            let listing = pane.listing.borrow();
+            let sources = pane
+                .selection()
+                .filter_map(|row| listing.rows.get(row))
+                .map(crate::transfer::Requested::selected)
+                .collect::<Vec<_>>();
+            (listing.path.clone(), sources)
+        };
         if sources.is_empty() || folder == destination {
             return;
         }
@@ -1210,16 +1242,11 @@ impl App {
             MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2,
         ) == IDOK
         {
-            let mut changes = Changes::folder(folder);
-            changes.folders.push(destination.clone());
-            self.submit(
-                Operation::Transfer {
-                    action,
-                    sources,
-                    destination,
-                },
-                changes,
-            );
+            self.enqueue_transfer(crate::transfer::Request::direct(
+                action,
+                [folder, destination],
+                sources,
+            ));
         }
         self.focus_list(index);
     }
@@ -1382,6 +1409,7 @@ impl App {
                 MB_OK | MB_ICONWARNING,
             );
         }
+        self.pump_transfers();
     }
     fn events(&self) {
         while let Ok(event) = self.events.try_recv() {
@@ -1401,6 +1429,8 @@ impl App {
                 Event::Operation(verb, changes, result) => {
                     self.finish_operation(verb, changes, result)
                 }
+                Event::TransferProgress(id, progress) => self.transfer_progress(id, progress),
+                Event::TransferFinished(id, report) => self.finish_transfer(id, report),
             }
         }
     }
@@ -1413,6 +1443,7 @@ impl App {
             CREATE_FOLDER => self.create_folder(),
             RECYCLE => self.recycle(),
             COMPARE => self.compare_folders(),
+            TRANSFERS => self.show_transfers(),
             REFRESH => self.refresh(self.active.get()),
             LEFT_CLEAR => self.clear_filter(0),
             RIGHT_CLEAR => self.clear_filter(1),
@@ -1487,6 +1518,7 @@ impl App {
             VK_P if ctrl && shift => self.save_pair(),
             VK_P if ctrl => self.pick_folder_pair(),
             VK_C if ctrl && shift => self.compare_folders(),
+            VK_J if ctrl => self.show_transfers(),
             VK_L if ctrl => unsafe {
                 let _ = SetFocus(Some(pane.path));
                 send(pane.path, EM_SETSEL, 0, -1);
@@ -1929,6 +1961,23 @@ unsafe extern "system" fn window_proc(
                     return LRESULT(0);
                 }
                 WM_CLOSE => {
+                    let waiting = app.waiting_transfers();
+                    if waiting != 0
+                        && message(
+                            window,
+                            "Waiting transfers",
+                            &format!(
+                                "Close Dual Pane and discard {} waiting transfers?",
+                                grouped(waiting as u64)
+                            ),
+                            MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+                        ) != IDYES
+                    {
+                        return LRESULT(0);
+                    }
+                    if app.operation_active.get() {
+                        return LRESULT(0);
+                    }
                     let _ = app.save_workspace();
                 }
                 WM_NCDESTROY => {

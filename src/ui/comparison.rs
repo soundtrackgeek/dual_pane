@@ -40,14 +40,19 @@ struct Revision {
 
 enum Outcome {
     Open([PathBuf; 2]),
-    Copy(Arc<Comparison>, Arc<Plan>),
+    Copy(crate::transfer::Request),
+}
+
+enum Validation {
+    Changed(Vec<usize>),
+    Ready(crate::transfer::Request),
 }
 
 enum Feed {
     Comparison(Revision, io::Result<Comparison>),
     Exact(io::Result<Vec<(usize, Exact)>>),
     Prepared(io::Result<Plan>),
-    Validation(io::Result<Vec<usize>>),
+    Validation(io::Result<Validation>),
 }
 
 struct Review {
@@ -184,22 +189,7 @@ impl App {
                 self.navigate(1, right);
                 self.focus_list(self.active.get());
             }
-            Some(Outcome::Copy(comparison, plan)) => {
-                let destination = comparison.paths[1 - plan.source].clone();
-                let changes = Changes {
-                    folders: vec![destination.clone()],
-                    rename: None,
-                    reveal: None,
-                };
-                self.submit(
-                    Operation::ReviewedCopy {
-                        comparison,
-                        plan,
-                        destination,
-                    },
-                    changes,
-                );
-            }
+            Some(Outcome::Copy(request)) => self.enqueue_transfer(request),
             None => {}
         }
     }
@@ -529,17 +519,18 @@ impl Dialog<'_> {
                     invalidate(child(window, LIST));
                 }
                 Feed::Prepared(Ok(plan)) => self.show_review(window, plan),
-                Feed::Validation(Ok(changed)) => {
+                Feed::Validation(Ok(validation)) => {
                     // Include any watcher messages already waiting on the owner's queue.
                     self.app.events();
                     let current = self.app.comparison_revision();
                     let mut state = self.state.borrow_mut();
                     let revision_changed = current != state.baseline;
-                    let comparison = state.comparison.as_ref().unwrap().clone();
                     let review = state.review.as_mut().unwrap();
-                    if !changed.is_empty() || revision_changed {
+                    if matches!(validation, Validation::Changed(_)) || revision_changed {
                         review.stale = true;
-                        review.changed.extend(changed);
+                        if let Validation::Changed(changed) = validation {
+                            review.changed.extend(changed);
+                        }
                         let text = if review.changed.is_empty() {
                             "A folder changed during review. Refresh and review again.".to_owned()
                         } else {
@@ -555,15 +546,14 @@ impl Dialog<'_> {
                         drop(state);
                         self.set_status(window, &text);
                         invalidate(child(window, LIST));
-                    } else if self.app.operation_active.get() {
+                    } else if !self.app.can_queue_transfer() {
                         drop(state);
                         self.set_status(
                             window,
-                            "Wait for the current file operation to finish, then apply again.",
+                            "The transfer queue is full. Remove or finish a waiting transfer and try again.",
                         );
-                    } else {
-                        self.outcome
-                            .replace(Some(Outcome::Copy(comparison, review.plan.clone())));
+                    } else if let Validation::Ready(request) = validation {
+                        self.outcome.replace(Some(Outcome::Copy(request)));
                         drop(state);
                         unsafe {
                             let _ = EndDialog(window, 1);
@@ -810,11 +800,11 @@ impl Dialog<'_> {
         let Some(review) = state.review.as_ref().filter(|review| !review.stale) else {
             return;
         };
-        if self.app.operation_active.get() {
+        if !self.app.can_queue_transfer() {
             drop(state);
             self.set_status(
                 window,
-                "Wait for the current file operation to finish, then apply again.",
+                "The transfer queue is full. Remove or finish a waiting transfer and try again.",
             );
             return;
         }
@@ -824,7 +814,15 @@ impl Dialog<'_> {
         self.start(
             window,
             "Checking both folders against the reviewed files…",
-            move |current| Feed::Validation(comparison.validate(&plan, current)),
+            move |current| {
+                Feed::Validation(comparison.validate(&plan, current).map(|changed| {
+                    if changed.is_empty() {
+                        Validation::Ready(crate::transfer::Request::reviewed(&comparison, &plan))
+                    } else {
+                        Validation::Changed(changed)
+                    }
+                }))
+            },
         );
     }
 

@@ -278,6 +278,12 @@ impl Comparison {
     }
 }
 
+impl Plan {
+    pub(crate) fn oriented_roots(&self) -> [Identity; 2] {
+        [self.roots[self.source], self.roots[1 - self.source]]
+    }
+}
+
 #[derive(Clone)]
 pub struct Plan {
     pub source: usize,
@@ -285,27 +291,13 @@ pub struct Plan {
     roots: [Identity; 2],
 }
 
-type Identity = (u32, u32, u32);
+pub(crate) type Identity = (u32, u32, u32);
 
 pub struct CopyItem {
     pub source: PathBuf,
     pub destination_name: OsString,
-    original: Stamp,
-    replacement: Option<Stamp>,
-}
-
-impl CopyItem {
-    pub fn check(&self, destination: &Path) -> io::Result<()> {
-        if path_stamp(&self.source)? != Some(self.original)
-            || path_stamp(&destination.join(&self.destination_name))? != self.replacement
-        {
-            return Err(io::Error::other(format!(
-                "A reviewed file changed before copying. Compare the folders again before retrying.\n{}",
-                self.source.display(),
-            )));
-        }
-        Ok(())
-    }
+    pub(crate) original: Stamp,
+    pub(crate) replacement: Option<Stamp>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -425,19 +417,27 @@ fn regular(entry: &Entry) -> bool {
         && directory::filename_issue(&entry.name[..entry.name.len() - 1]).is_none()
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct Stamp {
+pub(crate) struct Stamp {
     size: u64,
     time: u64,
     attributes: u32,
 }
 
 impl Stamp {
-    fn entry(entry: &Entry) -> Self {
+    pub(crate) fn entry(entry: &Entry) -> Self {
         Self {
             size: entry.size,
             time: entry.write_time(),
             attributes: entry.attributes,
         }
+    }
+
+    pub(crate) fn regular(self) -> bool {
+        self.attributes
+            & (FILE_ATTRIBUTE_DIRECTORY.0
+                | FILE_ATTRIBUTE_REPARSE_POINT.0
+                | FILE_ATTRIBUTE_DEVICE.0)
+            == 0
     }
 
     fn handle(info: &BY_HANDLE_FILE_INFORMATION) -> Self {
@@ -450,7 +450,7 @@ impl Stamp {
     }
 }
 
-fn path_stamp(path: &Path) -> io::Result<Option<Stamp>> {
+pub(crate) fn path_stamp(path: &Path) -> io::Result<Option<Stamp>> {
     use std::os::windows::fs::MetadataExt;
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => Ok(Some(Stamp {
@@ -482,7 +482,7 @@ fn file_info(file: &File) -> io::Result<BY_HANDLE_FILE_INFORMATION> {
     Ok(info)
 }
 
-fn directory_identity(path: &Path) -> io::Result<Identity> {
+pub(crate) fn directory_identity(path: &Path) -> io::Result<Identity> {
     let file = OpenOptions::new()
         .access_mode(0)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
@@ -499,6 +499,69 @@ fn directory_identity(path: &Path) -> io::Result<Identity> {
         info.nFileIndexHigh,
         info.nFileIndexLow,
     ))
+}
+
+pub(crate) fn regular_identity(path: &Path) -> io::Result<(Identity, Stamp)> {
+    let file = OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
+        .open(path)?;
+    let info = file_info(&file)?;
+    let stamp = Stamp::handle(&info);
+    if !stamp.regular() || (info.nFileIndexHigh == 0 && info.nFileIndexLow == 0) {
+        return Err(io::Error::other("A stable file identity is unavailable."));
+    }
+    Ok((
+        (
+            info.dwVolumeSerialNumber,
+            info.nFileIndexHigh,
+            info.nFileIndexLow,
+        ),
+        stamp,
+    ))
+}
+
+pub(crate) fn verify_review<'a>(
+    paths: &[PathBuf; 2],
+    files: impl IntoIterator<
+        Item = (
+            &'a std::ffi::OsStr,
+            &'a std::ffi::OsStr,
+            Stamp,
+            Option<Stamp>,
+        ),
+    >,
+    current: impl Fn() -> bool,
+) -> io::Result<()> {
+    let fresh = load(paths, &current)?;
+    let indexes = [
+        Index::new(&fresh[0], &current)?,
+        Index::new(&fresh[1], &current)?,
+    ];
+    for (source, destination, original, replacement) in files {
+        check(&current)?;
+        for (side, (name, expected)) in [(source, Some(original)), (destination, replacement)]
+            .into_iter()
+            .enumerate()
+        {
+            let wide = directory::wide(name);
+            let matches = match (indexes[side].unique(&wide), expected) {
+                (Ok(None), None) => true,
+                (Ok(Some(entry)), Some(stamp)) => {
+                    entry.name.as_ref() == wide && Stamp::entry(entry) == stamp
+                }
+                _ => false,
+            };
+            if !matches {
+                return Err(io::Error::other(format!(
+                    "A reviewed item changed. Compare the folders and review the copy again.\n{}",
+                    paths[side].join(name).display(),
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn compare_bytes(
@@ -681,11 +744,23 @@ mod tests {
         let plan = comparison.prepare(0, vec![0]).unwrap();
         assert!(comparison.validate(&plan, || true).unwrap().is_empty());
         let copy = comparison.copy_items(&plan).next().unwrap();
-        assert!(copy.check(&paths[1]).is_ok());
+        let verify = || {
+            verify_review(
+                &paths,
+                [(
+                    copy.source.file_name().unwrap(),
+                    copy.destination_name.as_os_str(),
+                    copy.original,
+                    copy.replacement,
+                )],
+                || true,
+            )
+        };
+        assert!(verify().is_ok());
 
         std::fs::write(&right_file, b"changed since review").unwrap();
         assert_eq!(comparison.validate(&plan, || true).unwrap(), vec![0]);
-        assert!(copy.check(&paths[1]).is_err());
+        assert!(verify().is_err());
         let retired = fixture.0.join("retired");
         std::fs::rename(&paths[1], retired).unwrap();
         std::fs::create_dir(&paths[1]).unwrap();

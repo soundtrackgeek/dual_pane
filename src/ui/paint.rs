@@ -174,6 +174,7 @@ impl App {
             self.create,
             self.recycle,
             self.pairs,
+            self.transfer_button,
             self.view,
         ] {
             send(control, WM_SETFONT, font.0 as usize, 0);
@@ -332,16 +333,23 @@ impl App {
         let mut x = footer.left;
         let compact = footer.right - footer.left < s(880);
         for (button, wide, narrow) in [
-            (self.rename, 104, 94),
-            (self.copy, 85, 73),
-            (self.move_, 85, 73),
-            (self.create, 100, 92),
-            (self.recycle, 103, 91),
+            (self.rename, 104, 89),
+            (self.copy, 85, 69),
+            (self.move_, 85, 70),
+            (self.create, 100, 85),
+            (self.recycle, 103, 86),
         ] {
             let width = if compact { narrow } else { wide };
             place(button, x, footer.top + s(13), s(width), s(32));
             x += s(width + 7);
         }
+        place(
+            self.transfer_button,
+            footer.right - s(275),
+            footer.top + s(13),
+            s(93),
+            s(32),
+        );
         place(
             self.pairs,
             footer.right - s(174),
@@ -501,11 +509,13 @@ impl App {
         let note = self.operation_status.borrow();
         let compact = layout.footer.right - layout.footer.left < s(880);
         let area = RECT {
-            left: layout.footer.left + s(if compact { 466 } else { 522 }),
-            right: layout.footer.right - s(184),
+            left: layout.footer.left + s(if compact { 441 } else { 522 }),
+            right: layout.footer.right - s(284),
             ..layout.footer
         };
-        label(dc, area, &note, p.muted, DT_RIGHT);
+        if area.right > area.left {
+            label(dc, area, &note, p.muted, DT_RIGHT);
+        }
     }
 
     fn paint_tabs(&self, strip: HWND, dc: HDC) {

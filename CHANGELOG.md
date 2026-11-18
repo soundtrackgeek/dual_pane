@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0] - 2026-11-18
+
+### Added
+
+- Added a serial queue for F5 copies, F6 moves, and reviewed copies that retains the confirmed paths and checks reviewed jobs when they start.
+- Added a modeless Transfers panel with Windows progress estimates, per-item outcomes, and recent session history.
+- Added queue pause and resume, removal of waiting transfers, active cancellation requests, and retry with original-file and destination checks.
+
 ## [0.4.0] - 2026-11-18
 
 ### Added
