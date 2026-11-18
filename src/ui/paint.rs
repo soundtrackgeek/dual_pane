@@ -802,7 +802,7 @@ impl App {
     }
 }
 
-pub(super) fn place(control: HWND, x: i32, y: i32, width: i32, height: i32) {
+fn place(control: HWND, x: i32, y: i32, width: i32, height: i32) {
     unsafe {
         let _ = SetWindowPos(
             control,

@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.0-rc.4] - 2026-11-18
+
+### Fixed
+
+- Fixed stale drive-button lettering after resizing or moving the pane divider, including at 125% display scaling.
+
 ## [1.0.0-rc.3] - 2026-11-18
 
 ### Added

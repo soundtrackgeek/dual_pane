@@ -2265,7 +2265,7 @@ mod tests {
         let window = create_window()?;
         let app = attach(window, &Workspace::default())?;
         app.set_drive_mask((1 << 26) - 1);
-        for dpi in [96, 144, 192] {
+        for dpi in [96, 120, 144, 192] {
             let size = RECT {
                 left: 40,
                 top: 40,
@@ -2313,7 +2313,8 @@ mod tests {
                 let expected_height = client.bottom
                     - app.scale(12)
                     - app.scale(59)
-                    - app.scale(166 + drives::DRIVE_ROW_HEIGHT);
+                    - app.scale(166)
+                    - app.scale(drives::DRIVE_ROW_HEIGHT);
                 assert!(expected_height > 0);
                 for list in lists {
                     assert_eq!(list.bottom - list.top, expected_height);
