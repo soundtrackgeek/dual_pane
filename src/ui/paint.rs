@@ -571,8 +571,8 @@ impl App {
             ..layout.footer
         };
         if area.right > area.left {
-            let status = if self.checking_update.get() && note.is_empty() {
-                "Checking for updates…"
+            let status = if note.is_empty() || self.checking_update.get() {
+                self.update_note.get()
             } else {
                 &note
             };

@@ -32,6 +32,9 @@ mod watch;
 
 #[cfg(windows)]
 fn main() {
+    if update::startup() {
+        return;
+    }
     if let Err(error) = ui::run() {
         ui::startup_error(&error.to_string());
     }

@@ -69,6 +69,13 @@ jobs:
         run: |
           $prefix = "./target/dist/filehelm-${env:VERSION}-windows-x64"
           ./scripts/test-installer.ps1 -Msi "$prefix.msi" -ExpectedVersion $env:VERSION -PortableZip "$prefix-portable.zip"
+          $root = (Get-Location).Path
+          $fixtureDirectory = New-Item -ItemType Directory -Path target/update-fixture -Force
+          $previous = Join-Path $fixtureDirectory.FullName previous.msi
+          $env:DOTNET_ROLL_FORWARD = 'Major'
+          & ./target/release-tools/5.0.2/wix.exe build installer/filehelm.wxs -arch x64 -pdbtype none -o $previous -d "Executable=$root/target/x86_64-pc-windows-msvc/release/filehelm.exe" -d "AppIcon=$root/assets/filehelm.ico" -d 'MsiVersion=0.0.1' -d 'ReleaseVersion=previous'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/test-installer.ps1 -Msi "$prefix.msi" -ExpectedVersion $env:VERSION -PreviousMsi $previous -AppUpdate
       - uses: actions/upload-artifact@v4
         if: steps.version.outputs.version != ''
         with:

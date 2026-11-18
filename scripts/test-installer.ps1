@@ -2,7 +2,8 @@ param(
     [Parameter(Mandatory)][string]$Msi,
     [Parameter(Mandatory)][string]$ExpectedVersion,
     [string]$PreviousMsi,
-    [string]$PortableZip
+    [string]$PortableZip,
+    [switch]$AppUpdate
 )
 
 $ErrorActionPreference = 'Stop'
@@ -47,6 +48,51 @@ function Get-UserDataState {
     } | ConvertTo-Json -Compress
 }
 
+function Wait-App([int]$PreviousId = 0) {
+    for ($attempt = 0; $attempt -lt 100; $attempt++) {
+        $app = Get-Process -Name filehelm -ErrorAction SilentlyContinue |
+            Where-Object { $_.Id -ne $PreviousId -and $_.Path -eq $executable -and $_.MainWindowHandle } |
+            Select-Object -First 1
+        if ($app) { return $app }
+        Start-Sleep -Milliseconds 100
+    }
+    throw 'The Filehelm window did not open.'
+}
+
+function Close-App($AppProcess) {
+    if (-not $AppProcess.HasExited -and
+        (-not $AppProcess.CloseMainWindow() -or -not $AppProcess.WaitForExit(10000))) {
+        throw 'The Filehelm window did not close.'
+    }
+}
+
+function Invoke-AppUpdate {
+    $stage = [IO.Directory]::CreateTempSubdirectory('filehelm-update-')
+    $helper = Join-Path $stage.FullName 'filehelm-updater.exe'
+    $package = Join-Path $stage.FullName 'update.msi'
+    Copy-Item -LiteralPath $executable -Destination $helper
+    Copy-Item -LiteralPath $Msi -Destination $package
+    Start-Process -FilePath $executable -ArgumentList '--no-workspace'
+    $app = Wait-App
+    $info = [Diagnostics.ProcessStartInfo]::new($helper)
+    $digest = (Get-FileHash -LiteralPath $package).Hash.ToLowerInvariant()
+    foreach ($argument in @('--apply-filehelm-update', "$($app.Id)", $executable, $digest, '--no-workspace')) {
+        $info.ArgumentList.Add($argument)
+    }
+    $updater = [Diagnostics.Process]::Start($info)
+    try {
+        Close-App $app
+        if (-not $updater.WaitForExit(60000)) { throw 'The update helper did not finish.' }
+        $reopened = Wait-App $app.Id
+        Close-App $reopened
+        Write-Host 'The update helper upgraded and reopened the MSI-installed application.'
+    } finally {
+        if (-not $updater.HasExited) { $updater.Kill(); $updater.WaitForExit() }
+        Close-App $app
+    }
+}
+
+if ($AppUpdate -and -not $PreviousMsi) { throw 'AppUpdate requires a previous MSI that contains the update helper.' }
 $userData = Get-UserDataState
 $cleanup = @()
 try {
@@ -56,7 +102,7 @@ try {
         Test-Installed
     }
     $cleanup = @($Msi) + $cleanup
-    Invoke-Installer '/i' $Msi 'install'
+    if ($AppUpdate) { Invoke-AppUpdate } else { Invoke-Installer '/i' $Msi 'install' }
     Test-Installed
     if ((Get-Item -LiteralPath $executable).VersionInfo.ProductVersion -ne $ExpectedVersion) {
         throw 'The installed executable has the wrong product version.'

@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.5] - 2026-11-18
+
+### Added
+
+- File → Update now downloads and verifies the matching Windows package, installs it, and reopens Filehelm. It supports both MSI installations and portable copies.
+- Update installation waits for active and queued file transfers to finish, and saves the workspace before closing Filehelm.
+
 ## [1.0.0-rc.4] - 2026-11-18
 
 ### Fixed

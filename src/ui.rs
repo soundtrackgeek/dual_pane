@@ -114,7 +114,8 @@ enum Event {
     HistoryLoaded(usize, std::io::Result<Vec<Arc<crate::undo::Group>>>),
     HistoryReviewed(usize, Vec<crate::undo::Check>),
     UndoFinished(std::io::Result<crate::undo::Applied>),
-    UpdateChecked(std::result::Result<Option<semver::Version>, String>),
+    UpdateChecked(std::result::Result<Option<crate::update::Release>, String>),
+    UpdateDownloaded(std::result::Result<crate::update::Prepared, String>),
 }
 
 struct Changes {
@@ -256,6 +257,8 @@ struct App {
     operation_active: Cell<bool>,
     operation_status: RefCell<String>,
     checking_update: Cell<bool>,
+    update_note: Cell<&'static str>,
+    pending_update: RefCell<Option<crate::update::Prepared>>,
     events: Receiver<Event>,
     sender: Sender<Event>,
     persist: bool,
@@ -741,6 +744,8 @@ impl App {
             operation_active: Cell::new(false),
             operation_status: RefCell::new(String::new()),
             checking_update: Cell::new(false),
+            update_note: Cell::new(""),
+            pending_update: RefCell::default(),
             events,
             sender,
             persist: workspace.persist,
@@ -1629,6 +1634,11 @@ impl App {
                 Event::HistoryReviewed(id, checks) => self.receive_undo_review(id, checks),
                 Event::UndoFinished(applied) => self.finish_undo(applied),
                 Event::UpdateChecked(result) => self.finish_update_check(result),
+                Event::UpdateDownloaded(result) => {
+                    if self.finish_update_download(result) {
+                        return;
+                    }
+                }
             }
         }
     }

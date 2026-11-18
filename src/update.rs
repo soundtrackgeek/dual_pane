@@ -2,22 +2,73 @@ use std::{ffi::c_void, ptr::null};
 
 use semver::Version;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use windows::{
     Win32::Networking::WinHttp::*,
     core::{Error, PCWSTR, w},
 };
 
+mod install;
+pub use install::{Prepared, startup};
+
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 pub const RELEASES: &str = "https://github.com/soundtrackgeek/dual_pane/releases";
+const MAX_PACKAGE: usize = 64 * 1024 * 1024;
 
-pub fn check() -> Result<Option<Version>, String> {
+#[derive(Debug)]
+pub struct Release {
+    pub version: Version,
+    msi: Asset,
+    portable: Asset,
+}
+
+#[derive(Debug)]
+struct Asset {
+    name: String,
+    size: usize,
+    digest: String,
+}
+
+impl Asset {
+    fn from_release(assets: &[Value], name: String) -> Option<Self> {
+        let asset = assets.iter().find(|asset| {
+            asset["name"].as_str() == Some(&name) && asset["state"].as_str() == Some("uploaded")
+        })?;
+        let size = usize::try_from(asset["size"].as_u64()?).ok()?;
+        let digest = asset["digest"].as_str()?.strip_prefix("sha256:")?;
+        (size > 0
+            && size <= MAX_PACKAGE
+            && digest.len() == 64
+            && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| Self {
+            name,
+            size,
+            digest: digest.to_ascii_lowercase(),
+        })
+    }
+
+    fn verify(&self, bytes: &[u8]) -> Result<(), String> {
+        if bytes.len() == self.size && format!("{:x}", Sha256::digest(bytes)) == self.digest {
+            Ok(())
+        } else {
+            Err("The downloaded package failed its SHA-256 integrity check.".into())
+        }
+    }
+}
+
+pub fn check() -> Result<Option<Release>, String> {
     let current = Version::parse(CURRENT).map_err(|error| error.to_string())?;
-    let releases = fetch_releases()?;
+    let releases = fetch(
+        w!("api.github.com"),
+        w!("/repos/soundtrackgeek/dual_pane/releases?per_page=100"),
+        2 * 1024 * 1024,
+        false,
+    )?;
     newer_release(&current, &releases)
         .map_err(|_| "GitHub returned an invalid release list.".into())
 }
 
-fn newer_release(current: &Version, body: &[u8]) -> serde_json::Result<Option<Version>> {
+fn newer_release(current: &Version, body: &[u8]) -> serde_json::Result<Option<Release>> {
     let releases: Vec<Value> = serde_json::from_slice(body)?;
     Ok(releases
         .iter()
@@ -32,17 +83,15 @@ fn newer_release(current: &Version, body: &[u8]) -> serde_json::Result<Option<Ve
             }
             let assets = release["assets"].as_array()?;
             let prefix = format!("filehelm-{version}-windows-x64");
-            let packaged = [format!("{prefix}.msi"), format!("{prefix}-portable.zip")]
-                .iter()
-                .all(|filename| {
-                    assets.iter().any(|asset| {
-                        asset["name"].as_str() == Some(filename)
-                            && asset["state"].as_str() == Some("uploaded")
-                    })
-                });
-            (packaged && version.cmp_precedence(current).is_gt()).then_some(version)
+            let msi = Asset::from_release(assets, format!("{prefix}.msi"))?;
+            let portable = Asset::from_release(assets, format!("{prefix}-portable.zip"))?;
+            version.cmp_precedence(current).is_gt().then_some(Release {
+                version,
+                msi,
+                portable,
+            })
         })
-        .max_by(Version::cmp_precedence))
+        .max_by(|a, b| a.version.cmp_precedence(&b.version)))
 }
 
 struct InternetHandle(*mut c_void);
@@ -65,33 +114,36 @@ impl Drop for InternetHandle {
     }
 }
 
-fn fetch_releases() -> Result<Vec<u8>, String> {
-    const MAX_RESPONSE: usize = 2 * 1024 * 1024;
+fn fetch(host: PCWSTR, path: PCWSTR, limit: usize, redirect: bool) -> Result<Vec<u8>, String> {
     let (status, body) = (|| -> windows::core::Result<_> {
         unsafe {
             let session = InternetHandle::new(WinHttpOpen(
-                w!("Filehelm update check"),
+                w!("Filehelm updater"),
                 WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                 PCWSTR::null(),
                 PCWSTR::null(),
                 0,
             ))?;
             WinHttpSetTimeouts(session.0, 5_000, 5_000, 5_000, 5_000)?;
-            let host =
-                InternetHandle::new(WinHttpConnect(session.0, w!("api.github.com"), 443, 0))?;
+            let host = InternetHandle::new(WinHttpConnect(session.0, host, 443, 0))?;
             let request = InternetHandle::new(WinHttpOpenRequest(
                 host.0,
                 w!("GET"),
-                w!("/repos/soundtrackgeek/dual_pane/releases?per_page=100"),
+                path,
                 PCWSTR::null(),
                 PCWSTR::null(),
                 null(),
                 WINHTTP_FLAG_SECURE,
             ))?;
+            let policy = if redirect {
+                WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP
+            } else {
+                WINHTTP_OPTION_REDIRECT_POLICY_NEVER
+            };
             WinHttpSetOption(
                 Some(request.0),
                 WINHTTP_OPTION_REDIRECT_POLICY,
-                Some(&WINHTTP_OPTION_REDIRECT_POLICY_NEVER.to_ne_bytes()),
+                Some(&policy.to_ne_bytes()),
             )?;
             WinHttpSendRequest(request.0, None, None, 0, 0, 0)?;
             WinHttpReceiveResponse(request.0, std::ptr::null_mut())?;
@@ -109,7 +161,7 @@ fn fetch_releases() -> Result<Vec<u8>, String> {
             if status == 200 {
                 let mut buffer = [0_u8; 8192];
                 let mut read = 0;
-                while body.len() <= MAX_RESPONSE {
+                while body.len() <= limit {
                     WinHttpReadData(
                         request.0,
                         buffer.as_mut_ptr().cast(),
@@ -128,8 +180,8 @@ fn fetch_releases() -> Result<Vec<u8>, String> {
     .map_err(|error| error.message())?;
 
     match status {
-        200 if body.len() <= MAX_RESPONSE => Ok(body),
-        200 => Err("GitHub returned an unexpectedly large release list.".into()),
+        200 if body.len() <= limit => Ok(body),
+        200 => Err("GitHub returned more data than expected.".into()),
         403 | 429 => Err("GitHub refused the update check. Try again later.".into()),
         _ => Err(format!("GitHub returned HTTP {status}.")),
     }
@@ -143,9 +195,10 @@ mod tests {
     fn release(tag: &str, draft: bool, prerelease: bool, packaged: bool) -> Value {
         let prefix = format!("filehelm-{}-windows-x64", tag.trim_start_matches('v'));
         let assets = if packaged {
+            let digest = format!("sha256:{:x}", Sha256::digest(b"package"));
             json!([
-                {"name": format!("{prefix}.msi"), "state": "uploaded"},
-                {"name": format!("{prefix}-portable.zip"), "state": "uploaded"},
+                {"name": format!("{prefix}.msi"), "state": "uploaded", "size": 7, "digest": digest},
+                {"name": format!("{prefix}-portable.zip"), "state": "uploaded", "size": 7, "digest": digest},
             ])
         } else {
             json!([])
@@ -164,7 +217,11 @@ mod tests {
             release("vnot-a-version", false, false, true),
         ]);
         let body = serde_json::to_vec(&releases).unwrap();
-        let find = |current| newer_release(&Version::parse(current).unwrap(), &body).unwrap();
+        let find = |current| {
+            newer_release(&Version::parse(current).unwrap(), &body)
+                .unwrap()
+                .map(|release| release.version)
+        };
         assert_eq!(
             find("1.1.0-rc.9"),
             Some(Version::parse("1.1.0-rc.10").unwrap())
@@ -175,9 +232,24 @@ mod tests {
 
         let stable = serde_json::to_vec(&[release("v1.1.0", false, false, true)]).unwrap();
         assert_eq!(
-            newer_release(&Version::parse("1.1.0-rc.10").unwrap(), &stable).unwrap(),
+            newer_release(&Version::parse("1.1.0-rc.10").unwrap(), &stable)
+                .unwrap()
+                .map(|release| release.version),
             Some(Version::parse("1.1.0").unwrap())
         );
         assert!(newer_release(&Version::parse(CURRENT).unwrap(), b"{}").is_err());
+    }
+
+    #[test]
+    fn rejects_truncated_and_modified_downloads() {
+        let candidate = release("v2.0.0", false, false, true);
+        let asset = Asset::from_release(
+            candidate["assets"].as_array().unwrap(),
+            "filehelm-2.0.0-windows-x64.msi".into(),
+        )
+        .unwrap();
+        assert!(asset.verify(b"package").is_ok());
+        assert!(asset.verify(b"packag").is_err());
+        assert!(asset.verify(b"Package").is_err());
     }
 }
