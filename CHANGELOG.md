@@ -6,6 +6,7 @@
 
 - Added the Filehelm Windows x64 per-user MSI, Start menu shortcut, and portable ZIP.
 - Added version-triggered Windows package verification and GitHub Releases publication.
+- Pinned the Rust toolchain used for local and GitHub release builds.
 
 ### Changed
 

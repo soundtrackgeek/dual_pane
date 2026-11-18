@@ -10,7 +10,7 @@ Both packages use the same per-user workspace and Undo history, including existi
 
 ## Build and run
 
-Build with stable Rust for Windows, using the MSVC target and Visual Studio Build Tools with the Desktop development with C++ workload and a Windows SDK.
+Build with the Rust version pinned in `rust-toolchain.toml`, using the MSVC target and Visual Studio Build Tools with the Desktop development with C++ workload and a Windows SDK.
 
 ```powershell
 cargo build --release --locked
