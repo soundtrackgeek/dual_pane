@@ -1,0 +1,18 @@
+#![windows_subsystem = "windows"]
+
+#[cfg(not(windows))]
+compile_error!("Dual Pane requires Windows.");
+
+#[cfg(windows)]
+mod directory;
+#[cfg(windows)]
+mod shell;
+#[cfg(windows)]
+mod ui;
+
+#[cfg(windows)]
+fn main() {
+    if let Err(error) = ui::run() {
+        ui::startup_error(&error.to_string());
+    }
+}
