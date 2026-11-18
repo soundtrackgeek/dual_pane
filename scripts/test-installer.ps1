@@ -62,7 +62,7 @@ function Wait-App([int]$PreviousId = 0) {
 function Close-App($AppProcess) {
     if ($AppProcess.HasExited) { return }
     $window = $AppProcess.MainWindowHandle
-    if (-not [FilehelmSmokeWindow]::PostMessageW($window, 0x0010, 0, 0) -and -not $AppProcess.HasExited) {
+    if (-not [FilehelmSmokeWindow]::PostMessageW($window, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero) -and -not $AppProcess.HasExited) {
         $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
         throw "Could not send WM_CLOSE to Filehelm process $($AppProcess.Id) (Win32 error $errorCode)."
     }

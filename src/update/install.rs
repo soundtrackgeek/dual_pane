@@ -103,7 +103,10 @@ fn installed(target: &Path) -> bool {
         .position(|value| *value == 0)
         .unwrap_or(data.len());
     let path = PathBuf::from(OsString::from_wide(&data[..end])).join("filehelm.exe");
-    fs::canonicalize(path).is_ok_and(|path| path == target)
+    fs::canonicalize(path)
+        .ok()
+        .zip(fs::canonicalize(target).ok())
+        .is_some_and(|(registered, running)| registered == running)
 }
 
 /// Returns true when this process is the staged installer helper.
