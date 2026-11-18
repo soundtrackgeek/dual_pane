@@ -46,6 +46,7 @@ mod batch_rename;
 mod comparison;
 mod drives;
 mod file_interop;
+mod file_menu;
 mod find_files;
 mod navigation;
 mod paint;
@@ -113,6 +114,7 @@ enum Event {
     HistoryLoaded(usize, std::io::Result<Vec<Arc<crate::undo::Group>>>),
     HistoryReviewed(usize, Vec<crate::undo::Check>),
     UndoFinished(std::io::Result<crate::undo::Applied>),
+    UpdateChecked(std::result::Result<Option<semver::Version>, String>),
 }
 
 struct Changes {
@@ -253,6 +255,7 @@ struct App {
     icons: Option<Icons>,
     operation_active: Cell<bool>,
     operation_status: RefCell<String>,
+    checking_update: Cell<bool>,
     events: Receiver<Event>,
     sender: Sender<Event>,
     persist: bool,
@@ -377,7 +380,7 @@ fn create_window() -> Result<HWND> {
             return Err(windows::core::Error::from_thread());
         }
         let dpi = GetDpiForSystem().max(96) as i32;
-        CreateWindowExW(
+        let window = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             class,
             w!("Filehelm"),
@@ -390,7 +393,12 @@ fn create_window() -> Result<HWND> {
             None,
             Some(instance),
             None,
-        )
+        )?;
+        if let Err(error) = file_menu::attach(window) {
+            let _ = DestroyWindow(window);
+            return Err(error);
+        }
+        Ok(window)
     }
 }
 
@@ -732,6 +740,7 @@ impl App {
             icons,
             operation_active: Cell::new(false),
             operation_status: RefCell::new(String::new()),
+            checking_update: Cell::new(false),
             events,
             sender,
             persist: workspace.persist,
@@ -1619,6 +1628,7 @@ impl App {
                 Event::HistoryLoaded(id, result) => self.receive_undo_history(id, result),
                 Event::HistoryReviewed(id, checks) => self.receive_undo_review(id, checks),
                 Event::UndoFinished(applied) => self.finish_undo(applied),
+                Event::UpdateChecked(result) => self.finish_update_check(result),
             }
         }
     }
@@ -1628,6 +1638,9 @@ impl App {
             return;
         }
         match command {
+            file_menu::SETTINGS => self.show_settings(),
+            file_menu::UPDATE => self.start_update_check(),
+            file_menu::ABOUT => self.show_about(),
             COPY => self.start_transfer(Transfer::Copy),
             MOVE => self.start_transfer(Transfer::Move),
             RENAME => self.rename(),

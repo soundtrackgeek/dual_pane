@@ -26,6 +26,8 @@ mod ui;
 #[cfg(windows)]
 mod undo;
 #[cfg(windows)]
+mod update;
+#[cfg(windows)]
 mod watch;
 
 #[cfg(windows)]

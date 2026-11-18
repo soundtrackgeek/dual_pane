@@ -8,6 +8,12 @@ Download the Windows x64 MSI or portable ZIP from [GitHub Releases](https://gith
 
 Both packages use the same per-user workspace and Undo history, including existing data from builds under the Dual Pane name. Installing a newer MSI upgrades the app in place. Uninstalling through Windows Settings keeps your workspace and Undo history. The release candidate is unsigned, so Windows may prompt before opening it.
 
+## Settings, updates, and version
+
+Open the **File** menu with **Alt+F**. Choose **Settings** to switch between the System, Light, and Dark themes. Filehelm applies the theme when you confirm and saves it with your workspace on exit. Choose **About** to see the version you’re running.
+
+Choose **File → Update** to check GitHub while you keep browsing. Stable builds offer newer stable versions, and prerelease builds also offer newer prereleases. When an update is available, open its release page from the prompt. Close Filehelm before running the newer MSI or extracting the portable ZIP over your old copy.
+
 ## Build and run
 
 Build with the Rust version pinned in `rust-toolchain.toml`, using the MSVC target and Visual Studio Build Tools with the Desktop development with C++ workload and a Windows SDK.

@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.3] - 2026-11-18
+
+### Added
+
+- Added a File menu with appearance settings, an on-demand GitHub release check, and an About dialog with the running version.
+- Added download links for newer releases with a Windows installer and portable ZIP. Stable builds check for stable updates, and prerelease builds also check for newer prereleases.
+
 ## [1.0.0-rc.2] - 2026-11-18
 
 ### Added

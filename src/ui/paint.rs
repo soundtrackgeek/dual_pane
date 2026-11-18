@@ -571,7 +571,12 @@ impl App {
             ..layout.footer
         };
         if area.right > area.left {
-            label(dc, area, &note, p.muted, DT_RIGHT);
+            let status = if self.checking_update.get() && note.is_empty() {
+                "Checking for updates…"
+            } else {
+                &note
+            };
+            label(dc, area, status, p.muted, DT_RIGHT);
         }
     }
 
