@@ -12,6 +12,8 @@ mod compare;
 #[cfg(windows)]
 mod directory;
 #[cfg(windows)]
+mod file_data;
+#[cfg(windows)]
 mod find;
 #[cfg(windows)]
 mod preview;

@@ -155,6 +155,15 @@ impl App {
         self.transfers.queue.borrow().waiting()
     }
 
+    pub fn clipboard_move_pending(&self, sequence: u32) -> bool {
+        self.transfers
+            .queue
+            .borrow()
+            .jobs
+            .iter()
+            .any(|job| !job.terminal() && job.request.clipboard_sequence() == Some(sequence))
+    }
+
     pub fn pump_transfers(&self) {
         // Other Shell file commands already use the same exclusive operation slot.
         if self.operation_active.get() {
@@ -222,7 +231,10 @@ impl App {
         job.phase = Phase::Finished;
         job.live = Vec::new();
         job.cancel = None;
-        let affected = job.request.paths.clone();
+        let request = job.request.clone();
+        let clipboard = request
+            .clipboard_sequence()
+            .filter(|_| report.completed() == report.items.len());
         let action = job.request.action;
         let note = format!("{} · {}", action.verb(), {
             job.report = Some(report);
@@ -231,12 +243,15 @@ impl App {
         queue.trim();
         drop(queue);
         self.operation_active.set(false);
+        if let Some(sequence) = clipboard {
+            self.finish_clipboard_move(sequence);
+        }
         *self.operation_status.borrow_mut() = note;
         for (index, pane) in self.panes.iter().enumerate() {
             let refresh = {
                 let listing = pane.listing.borrow();
-                listing.path == affected[1]
-                    || (matches!(action, Transfer::Move) && listing.path == affected[0])
+                listing.archive.is_none()
+                    && (listing.path == request.paths[1] || request.refresh_source(&listing.path))
             };
             if refresh {
                 self.refresh(index);
@@ -446,6 +461,7 @@ impl App {
         let count = queue.jobs.len();
         let item_count = job.map_or(0, |job| job.request.files.len());
         let folders = job.map(|job| job.request.paths.clone());
+        let mixed = job.is_some_and(|job| job.request.mixed_sources());
         let percentage = job.map_or(0, |job| {
             if job
                 .report
@@ -544,7 +560,9 @@ impl App {
         if let Some(paths) = folders {
             for (id, path) in [SOURCE, TARGET].into_iter().zip(paths) {
                 let field = control(window, id);
-                if window_text(field) != path.as_os_str() {
+                if id == SOURCE && mixed {
+                    set_text(field, "Multiple source folders");
+                } else if window_text(field) != path.as_os_str() {
                     show_path(field, &path);
                 }
             }
@@ -634,6 +652,9 @@ impl App {
                 .as_ref()
                 .and_then(|report| report.items.get(item.iItem as usize));
             match item.iSubItem {
+                0 if job.request.incoming_transfer() => {
+                    copy_text(item, &wide(job.request.source_path(file)))
+                }
                 0 => copy_text(item, &wide(&file.name)),
                 1 => copy_text(item, &wide(file.target())),
                 2 => copy_text(

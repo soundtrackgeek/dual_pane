@@ -44,6 +44,7 @@ use crate::{
 mod archives;
 mod batch_rename;
 mod comparison;
+mod file_interop;
 mod find_files;
 mod navigation;
 mod paint;
@@ -76,6 +77,9 @@ const DARK: u16 = 112;
 const FIND_FILES: u16 = 113;
 const QUICK_VIEW: u16 = 117;
 const BATCH_RENAME: u16 = 118;
+const CLIP_CUT: u16 = 119;
+const CLIP_COPY: u16 = 120;
+const CLIP_PASTE: u16 = 127;
 const LEFT_UP: u16 = 121;
 const RIGHT_UP: u16 = 122;
 const LEFT_CLEAR: u16 = 125;
@@ -221,6 +225,7 @@ struct App {
     find_files: find_files::FindFiles,
     quick_view: quick_view::QuickView,
     batch_rename: batch_rename::BatchRename,
+    file_interop: file_interop::FileInterop,
     saved_pairs: RefCell<Vec<SavedPair>>,
     menu: HMENU,
     accessibility: Option<IAccPropServices>,
@@ -244,6 +249,7 @@ struct App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        self.revoke_file_interop();
         unsafe {
             let _ = DeleteObject(self.font.get().into());
             let _ = DestroyMenu(self.menu);
@@ -274,11 +280,15 @@ fn message(owner: HWND, title: &str, text: &str, style: MESSAGEBOX_STYLE) -> MES
 }
 
 pub fn run() -> Result<()> {
-    let _apartment = shell::Apartment::enter()?;
+    let _apartment = crate::file_data::Ole::enter()?;
     let workspace = Workspace::startup();
     unsafe {
         let window = create_window()?;
         let app = attach(window, &workspace)?;
+        if app.register_file_interop().is_err() {
+            app.revoke_file_interop();
+            *app.operation_status.borrow_mut() = "Drag-and-drop unavailable".into();
+        }
         app.activate_tab(0);
         app.activate_tab(1);
         let _ = ShowWindow(window, SW_SHOW);
@@ -349,7 +359,7 @@ fn create_window() -> Result<HWND> {
             lpszClassName: class,
             ..Default::default()
         };
-        if RegisterClassW(&wc) == 0 {
+        if RegisterClassW(&wc) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
             return Err(windows::core::Error::from_thread());
         }
         let dpi = GetDpiForSystem().max(96) as i32;
@@ -651,6 +661,10 @@ impl App {
             menu_label(menu, COMPARE, w!("Compare &folders…\tCtrl+Shift+C"))?;
             menu_label(menu, TRANSFERS, w!("&Transfers\tCtrl+J"))?;
             AppendMenuW(menu, MF_SEPARATOR, 0, None)?;
+            menu_label(menu, CLIP_CUT, w!("Cu&t files\tCtrl+X"))?;
+            menu_label(menu, CLIP_COPY, w!("Cop&y files\tCtrl+C"))?;
+            menu_label(menu, CLIP_PASTE, w!("&Paste files\tCtrl+V"))?;
+            AppendMenuW(menu, MF_SEPARATOR, 0, None)?;
             menu_label(menu, SORT_NAME, w!("Sort by &name\tCtrl+1"))?;
             menu_label(menu, SORT_SIZE, w!("Sort by si&ze\tCtrl+2"))?;
             menu_label(menu, SORT_MODIFIED, w!("Sort by &modified\tCtrl+3"))?;
@@ -677,6 +691,7 @@ impl App {
             find_files: Default::default(),
             quick_view: Default::default(),
             batch_rename: Default::default(),
+            file_interop: Default::default(),
             saved_pairs: RefCell::new(workspace.pairs.clone()),
             menu,
             accessibility,
@@ -1560,6 +1575,9 @@ impl App {
             FIND_FILES => self.show_find_files(),
             QUICK_VIEW => self.show_quick_view(),
             BATCH_RENAME => self.show_batch_rename(),
+            CLIP_CUT => self.publish_files(true),
+            CLIP_COPY => self.publish_files(false),
+            CLIP_PASTE => self.paste_files(),
             TRANSFERS => self.show_transfers(),
             REFRESH => self.refresh(self.active.get()),
             LEFT_CLEAR => self.clear_filter(0),
@@ -1635,6 +1653,9 @@ impl App {
             VK_P if ctrl && shift => self.save_pair(),
             VK_P if ctrl => self.pick_folder_pair(),
             VK_C if ctrl && shift => self.compare_folders(),
+            VK_C if ctrl && in_list => self.publish_files(false),
+            VK_X if ctrl && in_list && !shift => self.publish_files(true),
+            VK_V if ctrl && in_list && !shift => self.paste_files(),
             VK_J if ctrl => self.show_transfers(),
             VK_M if ctrl => self.show_batch_rename(),
             VK_L if ctrl => unsafe {
@@ -1721,6 +1742,12 @@ impl App {
                 let item = &mut request.item;
                 let listing = pane.listing.borrow();
                 if let Some(entry) = listing.rows.get(item.iItem as usize) {
+                    if item.mask.contains(LVIF_STATE) && item.stateMask.0 & LVIS_CUT.0 != 0 {
+                        item.state.0 &= !LVIS_CUT.0;
+                        if self.row_is_cut(&listing, &entry.name) {
+                            item.state.0 |= LVIS_CUT.0;
+                        }
+                    }
                     if item.mask.contains(LVIF_IMAGE) {
                         item.iImage = self.icons.as_ref().map_or(-1, |icons| {
                             if entry.directory {
@@ -1758,6 +1785,7 @@ impl App {
                 return LRESULT(result.map_or(-1, |index| index as isize));
             }
             NM_SETFOCUS => self.active(index),
+            LVN_BEGINDRAG => self.start_file_drag(index),
             LVN_COLUMNCLICK => {
                 let click = unsafe { &*(data.0 as *const NMLISTVIEW) };
                 if let Some(column) = Column::from_index(click.iSubItem as usize) {
@@ -1975,6 +2003,10 @@ unsafe extern "system" fn window_proc(
                     return LRESULT(0);
                 }
                 WM_NOTIFY => return app.notify(lparam),
+                WM_CLIPBOARDUPDATE => {
+                    app.clipboard_changed();
+                    return LRESULT(0);
+                }
                 WM_COMMAND => {
                     let id = wparam.0 as u16;
                     let code = (wparam.0 >> 16) as u16;
@@ -2107,6 +2139,7 @@ unsafe extern "system" fn window_proc(
                     SetWindowLongPtrW(window, GWLP_USERDATA, 0);
                 }
                 WM_DESTROY => {
+                    app.revoke_file_interop();
                     if let Some(service) = &app.accessibility {
                         for pane in &app.panes {
                             for (control, _) in pane.accessible_controls() {

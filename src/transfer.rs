@@ -37,6 +37,7 @@ enum Policy {
     Reviewed([Identity; 2]),
     Retry([Identity; 2]),
     Extract(archive::Source),
+    Incoming { clipboard: Option<u32>, mixed: bool },
 }
 
 pub struct Request {
@@ -50,7 +51,8 @@ pub struct Request {
 pub struct Requested {
     pub name: OsString,
     target: Option<OsString>,
-    stamp: Stamp,
+    stamp: Option<Stamp>,
+    path: Option<PathBuf>,
     replacement: Option<Stamp>,
     identity: Option<Identity>,
 }
@@ -60,7 +62,8 @@ impl Requested {
         Self {
             name: entry.filename(),
             target: None,
-            stamp: Stamp::entry(entry),
+            stamp: Some(Stamp::entry(entry)),
+            path: None,
             replacement: None,
             identity: None,
         }
@@ -72,6 +75,72 @@ impl Requested {
 }
 
 impl Request {
+    pub fn incoming(
+        action: Transfer,
+        destination: PathBuf,
+        paths: Vec<PathBuf>,
+        clipboard: Option<u32>,
+    ) -> Option<Self> {
+        let source = paths.first()?.parent()?.to_owned();
+        let mixed = paths
+            .iter()
+            .any(|path| path.parent() != Some(source.as_path()));
+        let files = paths
+            .into_iter()
+            .filter_map(|path| {
+                Some(Requested {
+                    name: path.file_name()?.to_owned(),
+                    target: None,
+                    stamp: None,
+                    path: Some(path),
+                    replacement: None,
+                    identity: None,
+                })
+            })
+            .collect();
+        Some(Self {
+            action,
+            paths: [source, destination],
+            files,
+            policy: Policy::Incoming { clipboard, mixed },
+        })
+    }
+
+    pub fn clipboard_sequence(&self) -> Option<u32> {
+        if let Policy::Incoming { clipboard, .. } = self.policy {
+            clipboard
+        } else {
+            None
+        }
+    }
+
+    pub fn source_path(&self, file: &Requested) -> PathBuf {
+        file.path
+            .clone()
+            .unwrap_or_else(|| self.paths[0].join(&file.name))
+    }
+
+    pub fn refresh_source(&self, path: &std::path::Path) -> bool {
+        if !matches!(self.action, Transfer::Move) {
+            return false;
+        }
+        if self.incoming_transfer() {
+            self.files
+                .iter()
+                .any(|file| file.path.as_deref().and_then(std::path::Path::parent) == Some(path))
+        } else {
+            path == self.paths[0]
+        }
+    }
+
+    pub fn incoming_transfer(&self) -> bool {
+        matches!(self.policy, Policy::Incoming { .. })
+    }
+
+    pub fn mixed_sources(&self) -> bool {
+        matches!(self.policy, Policy::Incoming { mixed: true, .. })
+    }
+
     pub fn extract(paths: [PathBuf; 2], files: Vec<Requested>, source: archive::Source) -> Self {
         Self {
             action: Transfer::Extract,
@@ -110,7 +179,8 @@ impl Request {
                 .map(|item| Requested {
                     name: item.source.file_name().unwrap().to_os_string(),
                     target: Some(item.destination_name),
-                    stamp: item.original,
+                    stamp: Some(item.original),
+                    path: None,
                     replacement: item.replacement,
                     identity: None,
                 })
@@ -564,7 +634,7 @@ pub fn run(
     let invoked = tracker.invoked;
     if let Err(error) = result {
         tracker.report.aborted |= is_cancel(error.code());
-        tracker.report.failed = !is_cancel(error.code());
+        tracker.report.failed |= !is_cancel(error.code());
         tracker.report.note = error.message().trim().to_owned();
     }
     let aborted = tracker.report.aborted;
@@ -731,8 +801,17 @@ fn perform(
     tracker: &Arc<Mutex<Tracker>>,
 ) -> Result<()> {
     canceled(cancel)?;
-    let roots = request.identities().map_err(io_error)?;
-    tracker.lock().unwrap().report.roots = Some(roots);
+    let roots = if request.incoming_transfer() {
+        None
+    } else {
+        Some(request.identities().map_err(io_error)?)
+    };
+    let destination = if let Some(roots) = roots {
+        roots[1]
+    } else {
+        compare::directory_identity(&request.paths[1]).map_err(io_error)?
+    };
+    tracker.lock().unwrap().report.roots = roots;
     if matches!(request.policy, Policy::Reviewed(_) | Policy::Retry(_)) {
         compare::verify_review(
             &request.paths,
@@ -740,7 +819,7 @@ fn perform(
                 (
                     file.name.as_os_str(),
                     file.target(),
-                    file.stamp,
+                    file.stamp.unwrap(),
                     file.replacement,
                 )
             }),
@@ -757,18 +836,45 @@ fn perform(
         operation.SetOwnerWindow(HWND(owner as _))?;
         operation.SetOperationFlags(FOF_NOCONFIRMMKDIR | FOFX_ADDUNDORECORD)?;
     }
+    let mut registered = 0;
     for (index, file) in request.files.iter().enumerate() {
         canceled(cancel)?;
-        if let Err(error) = register(request, index, file, &operation, &target_folder, tracker) {
-            tracker.lock().unwrap().record(
-                index,
-                ItemState::Failed,
-                Some(error.message().trim().to_owned()),
-            );
-            return Err(error);
+        match register(
+            request,
+            index,
+            file,
+            &operation,
+            &target_folder,
+            tracker,
+            destination,
+        ) {
+            Ok(()) => registered += 1,
+            Err(error) => {
+                let mut state = tracker.lock().unwrap();
+                state.report.failed = true;
+                state.record(
+                    index,
+                    ItemState::Failed,
+                    Some(error.message().trim().to_owned()),
+                );
+                if !request.incoming_transfer() {
+                    return Err(error);
+                }
+            }
         }
     }
-    if request.identities().map_err(io_error)? != roots {
+    if registered == 0 {
+        return Err(Error::new(
+            E_FAIL,
+            "None of the supplied files could be transferred.",
+        ));
+    }
+    let same_folders = if let Some(roots) = roots {
+        request.identities().map_err(io_error)? == roots
+    } else {
+        compare::directory_identity(&request.paths[1]).map_err(io_error)? == destination
+    };
+    if !same_folders {
         return Err(Error::new(
             E_FAIL,
             "A folder changed while preparing the transfer. Review the folders again.",
@@ -797,16 +903,27 @@ fn register(
     operation: &IFileOperation,
     folder: &IShellItem,
     tracker: &Arc<Mutex<Tracker>>,
+    destination_folder: Identity,
 ) -> Result<()> {
-    let source = request.paths[0].join(&file.name);
+    let source = request.source_path(file);
     let target = request.paths[1].join(file.target());
-    if compare::path_stamp(&source).map_err(io_error)? != Some(file.stamp) {
+    let stamp = compare::path_stamp(&source).map_err(io_error)?;
+    if stamp.is_none() || file.stamp.is_some_and(|expected| Some(expected) != stamp) {
         return Err(Error::new(
             E_FAIL,
             format!(
                 "The source changed or is missing. Select it again.\n{}",
                 source.display()
             ),
+        ));
+    }
+    if request.incoming_transfer()
+        && compare::directory_identity(source.parent().unwrap()).map_err(io_error)?
+            == destination_folder
+    {
+        return Err(Error::new(
+            E_FAIL,
+            "This item is already in the destination folder.",
         ));
     }
     let destination = compare::path_stamp(&target).map_err(io_error)?;
@@ -821,10 +938,13 @@ fn register(
             ),
         ));
     }
-    let identity = if destination.is_none() && file.stamp.regular() {
+    let identity = if !request.incoming_transfer()
+        && destination.is_none()
+        && stamp.is_some_and(Stamp::regular)
+    {
         compare::regular_identity(&source)
             .ok()
-            .and_then(|(identity, stamp)| (stamp == file.stamp).then_some(identity))
+            .and_then(|(identity, observed)| (Some(observed) == stamp).then_some(identity))
     } else {
         None
     };
@@ -841,12 +961,13 @@ fn register(
     let canonical = shell_path(Some(&shell_item)).unwrap_or(source);
     {
         let mut state = tracker.lock().unwrap();
-        if state.paths.insert(canonical, index).is_some() {
+        if state.paths.contains_key(&canonical) {
             return Err(Error::new(
                 E_FAIL,
                 "Two selected names refer to the same Windows Shell item.",
             ));
         }
+        state.paths.insert(canonical, index);
         state.report.items[index].retry_identity = identity;
     }
     let name = file.target.as_ref().map(wide);

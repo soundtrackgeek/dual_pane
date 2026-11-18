@@ -33,6 +33,7 @@ Add `--no-workspace` for a temporary session that starts with the defaults and l
 | Backspace | Go to the parent folder from the file list |
 | Ctrl+R | Refresh the active pane |
 | Ctrl+A | Select all visible rows in the active file list |
+| Ctrl+X / Ctrl+C / Ctrl+V | Cut / copy / paste Windows files and folders in a file list |
 | Ctrl+F | Focus the active pane's filename filter |
 | Alt+F7 | Find files in subfolders |
 | Ctrl+1 / Ctrl+2 / Ctrl+3 | Sort by Name / Size / Modified. Repeat to reverse direction |
@@ -57,6 +58,14 @@ Use **Pairs…** to preview the left and right paths for a saved pair. Opening a
 The lists start in folders-first natural name order. Click **Name**, **Size**, or **Modified** to sort and click the same column again to reverse the order. The filter matches any part of a filename and ignores case. New folder visits start with a clear filter. Back and Forward return to the filter for that visit. The pane footer shows the filtered count and the selected count. Rows hidden by a filter leave the selection.
 
 Both local and UNC paths work for browsing. Dual Pane watches each open folder for changes and preserves the selected items and viewport when possible. An unsupported or disconnected watch leaves **Ctrl+R** available for a manual refresh. If Windows cannot recycle the selection, it presents a separate warning before a permanent deletion.
+
+## Windows clipboard and drag-and-drop
+
+Select files or folders in a disk pane and press **Ctrl+C** or **Ctrl+X**. Paste with **Ctrl+V** in another pane, tab, or File Explorer. You can also copy or cut in File Explorer and paste into an open disk pane. Cut items are dimmed while Dual Pane owns the cut clipboard. The path and filter fields use ordinary text clipboard shortcuts.
+
+Drag files or folders from File Explorer into a file list or between Dual Pane lists. The highlighted pane shows the destination and the proposed action. A drop copies by default when copying is available. Hold **Shift** to move or **Ctrl** to copy. The destination is the highlighted pane's open folder.
+
+Paste and drop capture the destination and queue the work in **Transfers**. Windows handles conflicts. Completed items remain in place when you cancel, and the panel reports each item. A fully completed clipboard move clears that cut only if the clipboard still holds the same data. Clipboard and drop support applies to Windows filesystem paths. Use **F5** to extract ZIP members.
 
 ## ZIP archives
 
@@ -102,7 +111,7 @@ Reviewed copy supports regular files. Name collisions, file/folder conflicts, fo
 
 ## Transfers
 
-Open **Transfers** or press **Ctrl+J**. Copies, moves, reviewed copies, and ZIP extractions run in order, one job at a time. The job keeps the source names and destination captured at confirmation. Each source is rechecked when the job starts.
+Open **Transfers** or press **Ctrl+J**. Copies, moves, reviewed copies, ZIP extractions, and clipboard and drop jobs run in order, one job at a time. The job keeps the source paths and destination captured when it was queued. Each source is checked when the job starts.
 
 The panel stays open while you browse. Select a job to see its paths, Windows' progress estimate, and results for the selected top-level items. Windows shows its file conflict and progress dialogs when needed. **Pause queue** holds the next job, **Remove waiting** cancels a job before it starts, and **Cancel transfer** asks Windows to stop the active job at its next cancellation point. Completed items remain in place.
 
@@ -119,6 +128,12 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
+
+## 0.10.0 verification
+
+Windows desktop checks covered File Explorer copy and cut in both directions, Unicode paths and folder transfers, native cut highlighting, an Explorer drop into Dual Pane, and both copy and Shift-move drags between panes.
+
+A mixed-source paste kept its destination after switching tabs and preserved clipboard data copied while the job waited. Canceling a 7,000-file clipboard move left the completed files in the destination and retained the remaining originals and the cut clipboard.
 
 ## 0.9.0 verification
 

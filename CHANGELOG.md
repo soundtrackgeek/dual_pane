@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.0] - 2026-11-18
+
+### Added
+
+- Added Windows file cut, copy, and paste for disk panes, with support for multiple files and folders and cut highlighting.
+- Added native drag-and-drop into and between file lists with destination and copy or move feedback.
+- Routed clipboard and drop operations through Transfers, including items from multiple source folders.
+
 ## [0.9.0] - 2026-11-18
 
 ### Added

@@ -391,6 +391,13 @@ impl App {
         }
         for (index, bounds) in layout.panes.into_iter().enumerate() {
             let active = index == self.active.get();
+            let drop = self
+                .file_interop
+                .drop_hint
+                .get()
+                .filter(|(pane, _)| *pane == index)
+                .map(|(_, label)| label);
+            let accented = active || drop.is_some();
             let mut intersection = RECT::default();
             if !unsafe { IntersectRect(&mut intersection, &bounds, &invalid) }.as_bool() {
                 continue;
@@ -399,10 +406,10 @@ impl App {
                 bottom: bounds.top + s(25),
                 ..bounds
             };
-            if active {
+            if accented {
                 background(dc, label_area, p.active_strip);
             }
-            let accent = if active { p.accent } else { p.edge };
+            let accent = if accented { p.accent } else { p.edge };
             background(
                 dc,
                 RECT {
@@ -428,8 +435,8 @@ impl App {
             label(
                 dc,
                 inset(label_area, s(9), 0),
-                heading,
-                if active { p.accent } else { p.muted },
+                drop.unwrap_or(heading),
+                if accented { p.accent } else { p.muted },
                 DT_LEFT,
             );
 
@@ -464,7 +471,11 @@ impl App {
                 top: bounds.top + s(135),
                 ..bounds
             };
-            background(dc, list_frame, p.edge);
+            background(
+                dc,
+                list_frame,
+                if drop.is_some() { p.accent } else { p.edge },
+            );
             background(dc, inset(list_frame, 1, 1), p.surface);
             let status_area = RECT {
                 top: bounds.bottom - s(30),
