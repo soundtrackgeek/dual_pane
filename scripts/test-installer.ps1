@@ -51,23 +51,22 @@ function Get-UserDataState {
 function Wait-App([int]$PreviousId = 0) {
     for ($attempt = 0; $attempt -lt 100; $attempt++) {
         $app = Get-Process -Name filehelm -ErrorAction SilentlyContinue |
-            Where-Object { $_.Id -ne $PreviousId -and $_.Path -eq $executable -and $_.MainWindowHandle } |
+            Where-Object {
+                $_.Id -ne $PreviousId -and [FilehelmSmokeProcess]::Executable($_.Id) -eq $executable
+            } |
             Select-Object -First 1
         if ($app) { return $app }
         Start-Sleep -Milliseconds 100
     }
-    throw 'The Filehelm window did not open.'
+    throw 'The Filehelm process did not reopen.'
 }
 
-function Close-App($AppProcess) {
-    if ($AppProcess.HasExited) { return }
-    $window = $AppProcess.MainWindowHandle
-    if (-not [FilehelmSmokeWindow]::PostMessageW($window, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero) -and -not $AppProcess.HasExited) {
-        $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        throw "Could not send WM_CLOSE to Filehelm process $($AppProcess.Id) (Win32 error $errorCode)."
-    }
-    if (-not $AppProcess.WaitForExit(10000)) {
-        throw "Filehelm process $($AppProcess.Id) did not exit after WM_CLOSE."
+function Stop-FixtureApp($AppProcess) {
+    # These fixture processes run without a workspace. The hosted runner may
+    # not expose their native windows to PowerShell's desktop.
+    if (-not $AppProcess.HasExited) {
+        $AppProcess.Kill()
+        if (-not $AppProcess.WaitForExit(10000)) { throw "Fixture $($AppProcess.Id) did not exit." }
     }
 }
 
@@ -77,8 +76,7 @@ function Invoke-AppUpdate {
     $package = Join-Path $stage.FullName 'update.msi'
     Copy-Item -LiteralPath $executable -Destination $helper
     Copy-Item -LiteralPath $Msi -Destination $package
-    Start-Process -FilePath $executable -ArgumentList '--no-workspace'
-    $app = Wait-App
+    $app = Start-Process -FilePath $executable -ArgumentList '--no-workspace' -PassThru
     $info = [Diagnostics.ProcessStartInfo]::new($helper)
     $digest = (Get-FileHash -LiteralPath $package).Hash.ToLowerInvariant()
     foreach ($argument in @('--apply-filehelm-update', "$($app.Id)", $executable, $digest, '--no-workspace')) {
@@ -86,25 +84,48 @@ function Invoke-AppUpdate {
     }
     $updater = [Diagnostics.Process]::Start($info)
     try {
-        Close-App $app
+        Stop-FixtureApp $app
         if (-not $updater.WaitForExit(60000)) { throw 'The update helper did not finish.' }
         $reopened = Wait-App $app.Id
-        Close-App $reopened
+        try {
+            for ($attempt = 0; $attempt -lt 50 -and (Test-Path -LiteralPath $stage.FullName); $attempt++) {
+                Start-Sleep -Milliseconds 100
+            }
+            if (Test-Path -LiteralPath $stage.FullName) { throw 'The reopened app did not clear the staging folder.' }
+        } finally {
+            Stop-FixtureApp $reopened
+        }
         Write-Host 'The update helper upgraded and reopened the MSI-installed application.'
     } finally {
         if (-not $updater.HasExited) { $updater.Kill(); $updater.WaitForExit() }
-        Close-App $app
+        Stop-FixtureApp $app
     }
 }
 
 if ($AppUpdate -and -not $PreviousMsi) { throw 'AppUpdate requires a previous MSI that contains the update helper.' }
-if ($AppUpdate -and -not ('FilehelmSmokeWindow' -as [type])) {
+if ($AppUpdate -and -not ('FilehelmSmokeProcess' -as [type])) {
     Add-Type @'
 using System;
 using System.Runtime.InteropServices;
-public static class FilehelmSmokeWindow {
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern bool PostMessageW(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
+using System.Text;
+public static class FilehelmSmokeProcess {
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr OpenProcess(uint access, bool inherit, int processId);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool QueryFullProcessImageName(IntPtr process, uint flags, StringBuilder path, ref int size);
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+    public static string Executable(int id) {
+        IntPtr handle = OpenProcess(0x1000, false, id);
+        if (handle == IntPtr.Zero) return "";
+        try {
+            var path = new StringBuilder(32768);
+            int size = path.Capacity;
+            return QueryFullProcessImageName(handle, 0, path, ref size) ? path.ToString() : "";
+        } finally {
+            CloseHandle(handle);
+        }
+    }
 }
 '@
 }
