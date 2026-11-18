@@ -1,6 +1,6 @@
 # Dual Pane
 
-A keyboard-first file manager for Windows 11. Browse, filter, and organize two folders side by side.
+A keyboard-first file manager for Windows 11. Browse, search, compare, and organize folders side by side.
 
 ## Build and run
 
@@ -34,6 +34,7 @@ Add `--no-workspace` for a temporary session that starts with the defaults and l
 | Ctrl+R | Refresh the active pane |
 | Ctrl+A | Select all visible rows in the active file list |
 | Ctrl+F | Focus the active pane's filename filter |
+| Alt+F7 | Find files in subfolders |
 | Ctrl+1 / Ctrl+2 / Ctrl+3 | Sort by Name / Size / Modified. Repeat to reverse direction |
 | Ctrl+Shift+C | Compare the folders in the two active tabs |
 | Ctrl+J | Open the Transfers panel |
@@ -54,6 +55,14 @@ Use **Pairs…** to preview the left and right paths for a saved pair. Opening a
 The lists start in folders-first natural name order. Click **Name**, **Size**, or **Modified** to sort and click the same column again to reverse the order. The filter matches any part of a filename and ignores case. New folder visits start with a clear filter. Back and Forward return to the filter for that visit. The pane footer shows the filtered count and the selected count. Rows hidden by a filter leave the selection.
 
 Both local and UNC paths work for browsing. Dual Pane watches each open folder for changes and preserves the selected items and viewport when possible. An unsupported or disconnected watch leaves **Ctrl+R** available for a manual refresh. If Windows cannot recycle the selection, it presents a separate warning before a permanent deletion.
+
+## Find files
+
+Press **Alt+F7** or choose **View → Find files…**. Enter part of a filename or use a wildcard such as `*.flac`. A wildcard matches the whole filename, with `*` matching zero or more characters and `?` matching one. Searches ignore case. Choose the active folder or both folders to search their subfolders. The app uses the folders open when you press **Find**.
+
+Results appear as files are found, and you can keep browsing during the search. **Stop** keeps the matches already displayed. If Windows is waiting for a network response, the worker can take longer to exit. The search skips directory junctions, symlinks, and other directory reparse points and reports skipped and unreadable folders when it finishes. Results are capped at 100,000 rows and a 32 MiB storage budget. Narrow the query when the result limit is reached.
+
+Select a match and press **Enter**, double-click it, or choose **Open folder in new tab**. The app opens a new tab on the source side and selects the file. The Find Files window hides after the jump. Press **Alt+F7** again to return to the results. **Close** ends any active search and clears its results.
 
 ## Compare folders
 
@@ -84,6 +93,12 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
+
+## 0.6.0 verification
+
+The Windows x64 release build searched 100,000 files across 100 local subfolders. Over five warm-cache runs, the median was **21 ms to first visible results** and **244 ms to all matches**. The median sampled peak private working set was **10.39 MiB**. After closing Find Files, Windows recorded **0 ms** of process CPU time over 10 seconds at idle.
+
+The desktop checks covered Unicode wildcard matching, junction skipping, unreadable folder reporting, opening a match in a new tab, and F5 and F6 from the revealed selection. With one pane pointed at a stalled loopback WebDAV endpoint, local matches and tab navigation remained responsive. Stop preserved visible results, and the replacement search kept its result after the old connection closed.
 
 ## 0.5.0 verification
 

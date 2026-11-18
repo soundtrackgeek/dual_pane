@@ -8,6 +8,8 @@ mod compare;
 #[cfg(windows)]
 mod directory;
 #[cfg(windows)]
+mod find;
+#[cfg(windows)]
 mod shell;
 #[cfg(windows)]
 mod transfer;

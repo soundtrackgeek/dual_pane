@@ -42,6 +42,7 @@ use crate::{
 };
 
 mod comparison;
+mod find_files;
 mod navigation;
 mod paint;
 mod pairs;
@@ -53,6 +54,7 @@ use navigation::{Anchors, Location, SavedPair, Tabs};
 use workspace::Workspace;
 
 const WAKE: u32 = WM_APP + 1;
+const FIND_WAKE: u32 = WM_APP + 2;
 const COPY: u16 = 101;
 const MOVE: u16 = 102;
 const REFRESH: u16 = 103;
@@ -68,6 +70,7 @@ const SORT_MODIFIED: u16 = 116;
 const SYSTEM: u16 = 110;
 const LIGHT: u16 = 111;
 const DARK: u16 = 112;
+const FIND_FILES: u16 = 113;
 const LEFT_UP: u16 = 121;
 const RIGHT_UP: u16 = 122;
 const LEFT_CLEAR: u16 = 125;
@@ -196,6 +199,7 @@ struct App {
     pairs: HWND,
     transfer_button: HWND,
     transfers: transfers::Transfers,
+    find_files: find_files::FindFiles,
     saved_pairs: RefCell<Vec<SavedPair>>,
     menu: HMENU,
     accessibility: Option<IAccPropServices>,
@@ -265,11 +269,16 @@ pub fn run() -> Result<()> {
                 -1 => return Err(windows::core::Error::from_thread()),
                 0 => break,
                 _ => {
-                    let panel = app.transfers.window.get();
-                    if !panel.0.is_null()
-                        && (msg.hwnd == panel || IsChild(panel, msg.hwnd).as_bool())
+                    if let Some(panel) = [app.transfers.window.get(), app.find_files.window.get()]
+                        .into_iter()
+                        .find(|panel| {
+                            !panel.0.is_null()
+                                && (msg.hwnd == *panel || IsChild(*panel, msg.hwnd).as_bool())
+                        })
                     {
-                        if !IsDialogMessageW(panel, &msg).as_bool() {
+                        if !app.find_panel_key(panel, &msg)
+                            && !IsDialogMessageW(panel, &msg).as_bool()
+                        {
                             let _ = TranslateMessage(&msg);
                             DispatchMessageW(&msg);
                         }
@@ -610,6 +619,7 @@ impl App {
         let menu = unsafe {
             let menu = CreatePopupMenu()?;
             menu_label(menu, REFRESH, w!("&Refresh active pane\tCtrl+R"))?;
+            menu_label(menu, FIND_FILES, w!("&Find files…\tAlt+F7"))?;
             menu_label(menu, COMPARE, w!("Compare &folders…\tCtrl+Shift+C"))?;
             menu_label(menu, TRANSFERS, w!("&Transfers\tCtrl+J"))?;
             AppendMenuW(menu, MF_SEPARATOR, 0, None)?;
@@ -635,6 +645,7 @@ impl App {
             pairs,
             transfer_button,
             transfers: Default::default(),
+            find_files: Default::default(),
             saved_pairs: RefCell::new(workspace.pairs.clone()),
             menu,
             accessibility,
@@ -1443,6 +1454,7 @@ impl App {
             CREATE_FOLDER => self.create_folder(),
             RECYCLE => self.recycle(),
             COMPARE => self.compare_folders(),
+            FIND_FILES => self.show_find_files(),
             TRANSFERS => self.show_transfers(),
             REFRESH => self.refresh(self.active.get()),
             LEFT_CLEAR => self.clear_filter(0),
@@ -1688,6 +1700,7 @@ impl App {
             VK_V => self.view_menu(),
             VK_LEFT => self.history(self.active.get(), false),
             VK_RIGHT => self.history(self.active.get(), true),
+            VK_F7 => self.show_find_files(),
             _ => return false,
         }
         true
@@ -1849,6 +1862,10 @@ unsafe extern "system" fn window_proc(
             match msg {
                 WAKE => {
                     app.events();
+                    return LRESULT(0);
+                }
+                FIND_WAKE => {
+                    app.receive_find_update(wparam.0);
                     return LRESULT(0);
                 }
                 WM_NOTIFY => return app.notify(lparam),

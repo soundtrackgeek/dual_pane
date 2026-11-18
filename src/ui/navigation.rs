@@ -138,10 +138,17 @@ impl Tabs {
     }
 
     pub fn open(&mut self) -> bool {
+        self.insert(self.current().snapshot())
+    }
+
+    pub fn open_location(&mut self, location: Location) -> bool {
+        self.insert(Tab::new(location, self.current().sort))
+    }
+
+    fn insert(&mut self, tab: Tab) -> bool {
         if self.items.len() == MAX_TABS {
             return false;
         }
-        let tab = self.current().snapshot();
         self.active += 1;
         self.items.insert(self.active, tab);
         true

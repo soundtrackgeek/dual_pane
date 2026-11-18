@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.0] - 2026-11-18
+
+### Added
+
+- Added a modeless Find Files window for recursive, case-insensitive filename and wildcard searches under one or both active folders.
+- Added streaming results, Stop, and a skipped-folder summary. Searches run on demand and skip directory junctions and other linked folders.
+- Added a shortcut from each result to a new tab on its source side, with the matching file selected.
+
 ## [0.5.0] - 2026-11-18
 
 ### Added

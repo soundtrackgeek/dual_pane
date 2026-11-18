@@ -460,6 +460,63 @@ fn sort(entries: &mut [Entry]) {
 
 struct Search(HANDLE);
 
+pub(crate) struct DirectoryEntries {
+    search: Option<Search>,
+    data: WIN32_FIND_DATAW,
+    first: bool,
+}
+
+impl DirectoryEntries {
+    pub fn open(directory: &Path) -> windows::core::Result<Self> {
+        let pattern = search_pattern(directory);
+        let mut data = WIN32_FIND_DATAW::default();
+        let search = match unsafe {
+            FindFirstFileExW(
+                PCWSTR(pattern.as_ptr()),
+                FindExInfoBasic,
+                (&mut data as *mut WIN32_FIND_DATAW).cast(),
+                FindExSearchNameMatch,
+                None,
+                FIND_FIRST_EX_LARGE_FETCH,
+            )
+        } {
+            Ok(handle) => Some(Search(handle)),
+            Err(error) if error.code() == ERROR_FILE_NOT_FOUND.to_hresult() => None,
+            Err(error) => return Err(error),
+        };
+        Ok(Self {
+            search,
+            data,
+            first: true,
+        })
+    }
+
+    pub fn next(&mut self) -> windows::core::Result<Option<(&[u16], &WIN32_FIND_DATAW)>> {
+        while let Some(search) = &self.search {
+            if !std::mem::take(&mut self.first)
+                && let Err(error) = unsafe { FindNextFileW(search.0, &mut self.data) }
+            {
+                self.search = None;
+                if error.code() != ERROR_NO_MORE_FILES.to_hresult() {
+                    return Err(error);
+                }
+                break;
+            }
+            let length = self
+                .data
+                .cFileName
+                .iter()
+                .position(|&unit| unit == 0)
+                .unwrap();
+            let name = &self.data.cFileName[..length];
+            if name != [b'.' as u16] && name != [b'.' as u16, b'.' as u16] {
+                return Ok(Some((&self.data.cFileName[..=length], &self.data)));
+            }
+        }
+        Ok(None)
+    }
+}
+
 impl Drop for Search {
     fn drop(&mut self) {
         unsafe {
@@ -510,45 +567,20 @@ pub(crate) fn read(
     current: impl Fn() -> bool,
     mut first_rows: impl FnMut(&[Entry]),
 ) -> windows::core::Result<Vec<Entry>> {
-    let pattern = search_pattern(directory);
-    let mut data = WIN32_FIND_DATAW::default();
-    let handle = unsafe {
-        FindFirstFileExW(
-            PCWSTR(pattern.as_ptr()),
-            FindExInfoBasic,
-            (&mut data as *mut WIN32_FIND_DATAW).cast(),
-            FindExSearchNameMatch,
-            None,
-            FIND_FIRST_EX_LARGE_FETCH,
-        )
-    };
-    let search = match handle {
-        Ok(handle) => Search(handle),
-        Err(error) if error.code() == ERROR_FILE_NOT_FOUND.to_hresult() => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-    };
-
+    let mut directory = DirectoryEntries::open(directory)?;
     let mut entries = Vec::new();
-    while current() {
-        let length = data.cFileName.iter().position(|&value| value == 0).unwrap();
-        let name = &data.cFileName[..length];
-        if name != [b'.' as u16] && name != [b'.' as u16, b'.' as u16] {
-            entries.push(Entry {
-                name: Box::from(&data.cFileName[..=length]),
-                directory: data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0,
-                size: (u64::from(data.nFileSizeHigh) << 32) | u64::from(data.nFileSizeLow),
-                modified: data.ftLastWriteTime,
-                attributes: data.dwFileAttributes,
-            });
-            if entries.len() == 128 {
-                first_rows(&entries);
-            }
-        }
-        if let Err(error) = unsafe { FindNextFileW(search.0, &mut data) } {
-            if error.code() != ERROR_NO_MORE_FILES.to_hresult() {
-                return Err(error);
-            }
-            break;
+    while current()
+        && let Some((name, data)) = directory.next()?
+    {
+        entries.push(Entry {
+            name: Box::from(name),
+            directory: data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0,
+            size: (u64::from(data.nFileSizeHigh) << 32) | u64::from(data.nFileSizeLow),
+            modified: data.ftLastWriteTime,
+            attributes: data.dwFileAttributes,
+        });
+        if entries.len() == 128 {
+            first_rows(&entries);
         }
     }
     Ok(entries)
