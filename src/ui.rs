@@ -1,6 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     ffi::{OsString, c_void},
     os::windows::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
@@ -41,6 +41,7 @@ use crate::{
     watch::{Notice, Rename, Watcher},
 };
 
+mod batch_rename;
 mod comparison;
 mod find_files;
 mod navigation;
@@ -73,6 +74,7 @@ const LIGHT: u16 = 111;
 const DARK: u16 = 112;
 const FIND_FILES: u16 = 113;
 const QUICK_VIEW: u16 = 117;
+const BATCH_RENAME: u16 = 118;
 const LEFT_UP: u16 = 121;
 const RIGHT_UP: u16 = 122;
 const LEFT_CLEAR: u16 = 125;
@@ -98,6 +100,8 @@ enum Event {
     TransferProgress(u64, crate::transfer::ProgressUpdate),
     TransferFinished(u64, crate::transfer::Report),
     PreviewFinished(usize, Option<crate::preview::Preview>),
+    RenameReviewed(usize, std::io::Result<crate::batch_rename::Plan>),
+    RenameFinished(crate::batch_rename::Report),
 }
 
 struct Changes {
@@ -124,6 +128,8 @@ enum WatchState {
     Unavailable,
 }
 
+type BatchNames = Arc<HashMap<Vec<u16>, Vec<u16>>>;
+
 #[derive(Default)]
 struct Listing {
     path: PathBuf,
@@ -146,6 +152,8 @@ struct Listing {
     pending_renames: Vec<Rename>,
     scan_renames: Vec<Rename>,
     display_renames: Vec<Rename>,
+    batch_names: Option<BatchNames>,
+    pending_batch_names: Option<BatchNames>,
     selection_epoch: usize,
     pending_reveal: Option<(usize, Vec<u16>)>,
     reveal: Option<(usize, Vec<u16>)>,
@@ -204,6 +212,7 @@ struct App {
     transfers: transfers::Transfers,
     find_files: find_files::FindFiles,
     quick_view: quick_view::QuickView,
+    batch_rename: batch_rename::BatchRename,
     saved_pairs: RefCell<Vec<SavedPair>>,
     menu: HMENU,
     accessibility: Option<IAccPropServices>,
@@ -277,6 +286,7 @@ pub fn run() -> Result<()> {
                         app.transfers.window.get(),
                         app.find_files.window.get(),
                         app.quick_view.window.get(),
+                        app.batch_rename.window.get(),
                     ]
                     .into_iter()
                     .find(|panel| {
@@ -629,6 +639,7 @@ impl App {
             menu_label(menu, REFRESH, w!("&Refresh active pane\tCtrl+R"))?;
             menu_label(menu, FIND_FILES, w!("&Find files…\tAlt+F7"))?;
             menu_label(menu, QUICK_VIEW, w!("&Quick View…\tF3"))?;
+            menu_label(menu, BATCH_RENAME, w!("&Batch Rename…\tCtrl+M"))?;
             menu_label(menu, COMPARE, w!("Compare &folders…\tCtrl+Shift+C"))?;
             menu_label(menu, TRANSFERS, w!("&Transfers\tCtrl+J"))?;
             AppendMenuW(menu, MF_SEPARATOR, 0, None)?;
@@ -656,6 +667,7 @@ impl App {
             transfers: Default::default(),
             find_files: Default::default(),
             quick_view: Default::default(),
+            batch_rename: Default::default(),
             saved_pairs: RefCell::new(workspace.pairs.clone()),
             menu,
             accessibility,
@@ -839,7 +851,7 @@ impl App {
         let pane = &self.panes[index];
         let mut listing = pane.listing.borrow_mut();
         listing.dirty = true;
-        if listing.loading || listing.refresh_pending {
+        if listing.loading || listing.refresh_pending || self.batch_running_in(&listing.path) {
             return;
         }
         listing.refresh_pending = self.timer(REFRESH_TIMER + index, 100);
@@ -865,6 +877,11 @@ impl App {
         let pane = &self.panes[index];
         self.kill_timer(REFRESH_TIMER + index);
         let mut listing = pane.listing.borrow_mut();
+        if self.batch_running_in(&listing.path) {
+            listing.dirty = true;
+            listing.refresh_pending = false;
+            return;
+        }
         listing.request = listing.request.wrapping_add(1);
         listing.loading = true;
         listing.dirty = false;
@@ -970,6 +987,9 @@ impl App {
                 if !preview {
                     let aliases = std::mem::take(&mut listing.scan_renames);
                     add_renames(&mut listing.display_renames, aliases);
+                    if let Some(names) = listing.pending_batch_names.take() {
+                        listing.batch_names = Some(names);
+                    }
                     if let Some(reveal) = listing.pending_reveal.take() {
                         listing.reveal = Some(reveal);
                     }
@@ -1102,10 +1122,14 @@ impl App {
             None
         };
         let name_at = |row: isize| {
-            listing
-                .rows
-                .get(row as usize)
-                .map(|row| renamed(&row.name, &listing.display_renames))
+            listing.rows.get(row as usize).map(|row| {
+                let name = listing
+                    .batch_names
+                    .as_ref()
+                    .and_then(|names| names.get(row.name.as_ref()))
+                    .map_or(row.name.as_ref(), Vec::as_slice);
+                renamed(name, &listing.display_renames)
+            })
         };
         let selected = pane
             .selection()
@@ -1176,6 +1200,7 @@ impl App {
             listing.reveal = None;
             if listing.complete {
                 listing.restore = None;
+                listing.batch_names = None;
             }
         }
         self.changing_rows.set(true);
@@ -1455,6 +1480,8 @@ impl App {
                 Event::TransferProgress(id, progress) => self.transfer_progress(id, progress),
                 Event::TransferFinished(id, report) => self.finish_transfer(id, report),
                 Event::PreviewFinished(id, preview) => self.receive_preview(id, preview),
+                Event::RenameReviewed(id, plan) => self.receive_batch_review(id, plan),
+                Event::RenameFinished(report) => self.finish_batch_rename(report),
             }
         }
     }
@@ -1469,6 +1496,7 @@ impl App {
             COMPARE => self.compare_folders(),
             FIND_FILES => self.show_find_files(),
             QUICK_VIEW => self.show_quick_view(),
+            BATCH_RENAME => self.show_batch_rename(),
             TRANSFERS => self.show_transfers(),
             REFRESH => self.refresh(self.active.get()),
             LEFT_CLEAR => self.clear_filter(0),
@@ -1545,6 +1573,7 @@ impl App {
             VK_P if ctrl => self.pick_folder_pair(),
             VK_C if ctrl && shift => self.compare_folders(),
             VK_J if ctrl => self.show_transfers(),
+            VK_M if ctrl => self.show_batch_rename(),
             VK_L if ctrl => unsafe {
                 let _ = SetFocus(Some(pane.path));
                 send(pane.path, EM_SETSEL, 0, -1);

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.0] - 2026-11-18
+
+### Added
+
+- Added Batch Rename for selected files, with literal replacement, prefix and suffix rules, sequence numbering, and optional extension preservation.
+- Added a virtual side-by-side preview that flags invalid names, duplicate targets, occupied destinations, and unsupported selections.
+- Added file identity and destination rechecks, no-overwrite renames, and per-file results when a batch finishes or stops.
+
 ## [0.7.0] - 2026-11-18
 
 ### Added

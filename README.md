@@ -41,6 +41,7 @@ Add `--no-workspace` for a temporary session that starts with the defaults and l
 | Ctrl+P | Open the folder-pair picker |
 | Ctrl+Shift+P | Save the two visible folders as a named pair |
 | F2 | Rename the selected file or folder |
+| Ctrl+M | Review a batch rename for the selected files |
 | F3 | Preview the focused file in Quick View |
 | F5 / F6 | Queue a confirmed copy / move to the opposite pane |
 | F7 | Create a folder in the active pane |
@@ -56,6 +57,14 @@ Use **Pairs…** to preview the left and right paths for a saved pair. Opening a
 The lists start in folders-first natural name order. Click **Name**, **Size**, or **Modified** to sort and click the same column again to reverse the order. The filter matches any part of a filename and ignores case. New folder visits start with a clear filter. Back and Forward return to the filter for that visit. The pane footer shows the filtered count and the selected count. Rows hidden by a filter leave the selection.
 
 Both local and UNC paths work for browsing. Dual Pane watches each open folder for changes and preserves the selected items and viewport when possible. An unsupported or disconnected watch leaves **Ctrl+R** available for a manual refresh. If Windows cannot recycle the selection, it presents a separate warning before a permanent deletion.
+
+## Batch Rename
+
+Select regular files in one pane and press **Ctrl+M**, or choose **View → Batch Rename…**. The tool captures that selection in its visible order. Enter a literal, case-sensitive **Find** and **Replace** rule, add a prefix or suffix, or append a space and a sequence number. Set **Start at** and **Digits** to control numbering. **Keep extensions** is on by default.
+
+Click **Review** to see each original name, proposed name, and status. Changing a rule clears the review. Invalid names, duplicate targets, existing names, folders, and linked files must be resolved before **Apply** is enabled. A target occupied by another selected file is treated as a conflict. Case-only changes to the original name are supported.
+
+**Apply** rechecks the reviewed file identities and destinations, then renames without overwriting. If a check fails before any rename, review again after resolving the problem. If Windows stops the batch partway through, the result shows which names changed and which were unattempted. Close and reopen Batch Rename to start from a fresh selection.
 
 ## Quick View
 
@@ -95,13 +104,19 @@ The queue and its recent history belong to the current app session. Closing the 
 
 ## Implementation
 
-Dual Pane uses Rust, Microsoft's `windows` crate, and Win32 common controls. Each pane uses one virtual list view and one folder watcher. Inactive tabs retain navigation state. Background folder enumeration uses a bounded work queue. Large listings show an early batch while the complete folder is read and sorted. Rows use shared Windows icons and format their metadata on demand. Filename filtering and sorting run on the same background workers. Folder watches use asynchronous Windows change notifications and group bursts of changes before rescanning. Copy, move, rename, and recycle use Windows Shell file operations.
+Dual Pane uses Rust, Microsoft's `windows` crate, and Win32 common controls. Each pane uses one virtual list view and one folder watcher. Inactive tabs retain navigation state. Background folder enumeration uses a bounded work queue. Large listings show an early batch while the complete folder is read and sorted. Rows use shared Windows icons and format their metadata on demand. Filename filtering and sorting run on the same background workers. Folder watches use asynchronous Windows change notifications and group bursts of changes before rescanning. Copy, move, single-item rename, and recycle use Windows Shell file operations. Batch Rename uses native file handles and a virtual preview list.
 
 ```powershell
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
+
+## 0.8.0 verification
+
+Over five warm-cache Windows x64 runs, reviewing **10,000 selected files** took a median of **316 ms**. A tab change during review took **7.4 ms**. Median private working set was **4.40 MiB** with the panel open before review and **6.66 MiB** at the sampled peak. Windows recorded **0 ms** of process CPU time over 10 seconds after closing the panel.
+
+A separate Windows run applied 10,000 renames in about **3.2 seconds**, including scripted confirmation. It verified that numbering followed descending sort order and that all renamed files stayed selected. Smaller runs covered Unicode, case-only changes, duplicate and reserved names, a late destination, a same-size replacement with a matching timestamp, and a sharing violation that stopped the batch after one file.
 
 ## 0.7.0 verification
 

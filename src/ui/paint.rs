@@ -180,6 +180,7 @@ impl App {
             send(control, WM_SETFONT, font.0 as usize, 0);
         }
         self.update_find_font(font);
+        self.update_batch_font(font);
         unsafe {
             let _ = DeleteObject(previous.into());
         }

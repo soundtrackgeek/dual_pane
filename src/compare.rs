@@ -319,13 +319,13 @@ impl Exact {
     }
 }
 
-struct Index<'a> {
+pub(crate) struct Index<'a> {
     entries: &'a [Entry],
     order: Vec<u32>,
 }
 
 impl<'a> Index<'a> {
-    fn new(entries: &'a [Entry], current: impl Fn() -> bool) -> io::Result<Self> {
+    pub(crate) fn new(entries: &'a [Entry], current: impl Fn() -> bool) -> io::Result<Self> {
         check(&current)?;
         let len = u32::try_from(entries.len()).map_err(io::Error::other)?;
         let mut order = (0..len).collect::<Vec<_>>();
@@ -354,7 +354,7 @@ impl<'a> Index<'a> {
             .count()
     }
 
-    fn unique(&self, key: &[u16]) -> Result<Option<&'a Entry>, ()> {
+    pub(crate) fn unique(&self, key: &[u16]) -> Result<Option<&'a Entry>, ()> {
         let position = self
             .order
             .partition_point(|&index| ordinal(&self.entries[index as usize].name, key).is_lt());
@@ -374,7 +374,7 @@ impl<'a> Index<'a> {
     }
 }
 
-fn ordinal(left: &[u16], right: &[u16]) -> Ordering {
+pub(crate) fn ordinal(left: &[u16], right: &[u16]) -> Ordering {
     let result = unsafe { CompareStringOrdinal(left, right, true) };
     if result == CSTR_EQUAL {
         Ordering::Equal
@@ -488,7 +488,11 @@ pub(crate) fn directory_identity(path: &Path) -> io::Result<Identity> {
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
         .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
         .open(path)?;
-    let info = file_info(&file)?;
+    directory_handle_identity(&file)
+}
+
+pub(crate) fn directory_handle_identity(file: &File) -> io::Result<Identity> {
+    let info = file_info(file)?;
     if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
         return Err(io::Error::other(
             "A reviewed folder is no longer a directory.",
@@ -507,7 +511,11 @@ pub(crate) fn regular_identity(path: &Path) -> io::Result<(Identity, Stamp)> {
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
         .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
         .open(path)?;
-    let info = file_info(&file)?;
+    regular_handle_identity(&file)
+}
+
+pub(crate) fn regular_handle_identity(file: &File) -> io::Result<(Identity, Stamp)> {
+    let info = file_info(file)?;
     let stamp = Stamp::handle(&info);
     if !stamp.regular() || (info.nFileIndexHigh == 0 && info.nFileIndexLow == 0) {
         return Err(io::Error::other("A stable file identity is unavailable."));
