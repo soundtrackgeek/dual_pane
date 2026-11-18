@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0] - 2026-11-18
+
+### Added
+
+- Added a comparison of immediate folder contents with case-insensitive name matching and filters for missing, newer, and metadata-matched entries.
+- Added cancellable byte comparison for selected regular-file pairs and a command to open matching folders in both panes.
+- Added directional copy review with exact destination names, replacement labels, stale-plan checks, and Windows copy confirmation.
+
 ## [0.3.0] - 2026-11-18
 
 ### Added

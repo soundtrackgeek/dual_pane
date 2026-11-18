@@ -4,6 +4,8 @@
 compile_error!("Dual Pane requires Windows.");
 
 #[cfg(windows)]
+mod compare;
+#[cfg(windows)]
 mod directory;
 #[cfg(windows)]
 mod shell;

@@ -1,6 +1,7 @@
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use windows::{
@@ -23,7 +24,10 @@ use windows::{
     core::{PCWSTR, Result, w},
 };
 
-use crate::directory::wide;
+use crate::{
+    compare::{Comparison, Plan},
+    directory::wide,
+};
 
 #[derive(Clone, Copy)]
 pub enum Transfer {
@@ -70,6 +74,11 @@ pub enum Operation {
         sources: Vec<PathBuf>,
         destination: PathBuf,
     },
+    ReviewedCopy {
+        comparison: Arc<Comparison>,
+        plan: Arc<Plan>,
+        destination: PathBuf,
+    },
     Rename {
         source: PathBuf,
         name: OsString,
@@ -82,6 +91,7 @@ impl Operation {
     pub fn verb(&self) -> &'static str {
         match self {
             Self::Transfer { action, .. } => action.verb(),
+            Self::ReviewedCopy { .. } => "Copy",
             Self::Rename { .. } => "Rename",
             Self::CreateFolder(_) => "New folder",
             Self::Recycle(_) => "Recycle",
@@ -125,6 +135,32 @@ impl Operation {
                     operation.SetOperationFlags(FOFX_ADDUNDORECORD)?;
                     let name = wide(name);
                     operation.RenameItem(&item(source)?, PCWSTR(name.as_ptr()), None)?;
+                }
+                Self::ReviewedCopy {
+                    comparison,
+                    plan,
+                    destination,
+                } => {
+                    let changed = |error: std::io::Error| {
+                        windows::core::Error::new(
+                            windows::Win32::Foundation::E_FAIL,
+                            error.to_string(),
+                        )
+                    };
+                    comparison.check_roots(plan).map_err(changed)?;
+                    let folder = item(destination)?;
+                    operation.SetOperationFlags(FOFX_ADDUNDORECORD | FOF_NOCONFIRMMKDIR)?;
+                    for file in comparison.copy_items(plan) {
+                        file.check(destination).map_err(changed)?;
+                        let name = wide(file.destination_name);
+                        operation.CopyItem(
+                            &item(&file.source)?,
+                            &folder,
+                            PCWSTR(name.as_ptr()),
+                            None,
+                        )?;
+                    }
+                    comparison.check_roots(plan).map_err(changed)?;
                 }
                 Self::Recycle(sources) => {
                     operation.SetOperationFlags(

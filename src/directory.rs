@@ -35,13 +35,18 @@ pub fn wide(value: impl AsRef<OsStr>) -> Vec<u16> {
 pub struct Entry {
     pub name: Box<[u16]>,
     pub directory: bool,
-    size: u64,
-    modified: FILETIME,
+    pub(crate) size: u64,
+    pub(crate) modified: FILETIME,
+    pub(crate) attributes: u32,
 }
 
 impl Entry {
     pub fn filename(&self) -> OsString {
         OsString::from_wide(&self.name[..self.name.len() - 1])
+    }
+
+    pub(crate) fn write_time(&self) -> u64 {
+        u64::from(self.modified.dwHighDateTime) << 32 | u64::from(self.modified.dwLowDateTime)
     }
 
     pub fn detail(&self, column: i32) -> String {
@@ -73,6 +78,50 @@ impl Entry {
             _ => String::new(),
         }
     }
+}
+
+pub(crate) fn filename_issue(units: &[u16]) -> Option<&'static str> {
+    if units.is_empty() {
+        return Some("Enter a name.");
+    }
+    if units.len() > 255 {
+        return Some("Use 255 characters or fewer.");
+    }
+    if units.iter().any(|unit| {
+        *unit < 32
+            || b"<>:\"/\\|?*"
+                .iter()
+                .any(|&symbol| u16::from(symbol) == *unit)
+    }) {
+        return Some("The name contains a character that Windows does not allow.");
+    }
+    if units
+        .last()
+        .is_some_and(|unit| *unit == b' ' as u16 || *unit == b'.' as u16)
+    {
+        return Some("A name cannot end with a space or a period.");
+    }
+    let device = String::from_utf16_lossy(units);
+    let device = device
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_ascii_uppercase();
+    if matches!(
+        device.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || ["COM", "LPT"].into_iter().any(|prefix| {
+        device.strip_prefix(prefix).is_some_and(|suffix| {
+            matches!(
+                suffix,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        })
+    }) {
+        return Some("Windows reserves this name for a device.");
+    }
+    None
 }
 
 pub fn grouped(number: u64) -> String {
@@ -447,6 +496,18 @@ pub fn extended_path(path: &Path) -> Vec<u16> {
 fn scan(
     directory: &Path,
     current: impl Fn() -> bool,
+    first_rows: impl FnMut(&[Entry]),
+) -> windows::core::Result<Vec<Entry>> {
+    let mut entries = read(directory, &current, first_rows)?;
+    if current() {
+        sort(&mut entries);
+    }
+    Ok(entries)
+}
+
+pub(crate) fn read(
+    directory: &Path,
+    current: impl Fn() -> bool,
     mut first_rows: impl FnMut(&[Entry]),
 ) -> windows::core::Result<Vec<Entry>> {
     let pattern = search_pattern(directory);
@@ -477,6 +538,7 @@ fn scan(
                 directory: data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0,
                 size: (u64::from(data.nFileSizeHigh) << 32) | u64::from(data.nFileSizeLow),
                 modified: data.ftLastWriteTime,
+                attributes: data.dwFileAttributes,
             });
             if entries.len() == 128 {
                 first_rows(&entries);
@@ -488,9 +550,6 @@ fn scan(
             }
             break;
         }
-    }
-    if current() {
-        sort(&mut entries);
     }
     Ok(entries)
 }
@@ -525,6 +584,7 @@ mod tests {
             name: wide(name).into_boxed_slice(),
             directory,
             size,
+            attributes: 0,
             modified: FILETIME {
                 dwLowDateTime: timestamp,
                 dwHighDateTime: 0,

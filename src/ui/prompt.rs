@@ -207,49 +207,8 @@ unsafe extern "system" fn dialog_proc(
 
 fn invalid_name(value: &OsStr) -> Option<&'static str> {
     let units = value.encode_wide().collect::<Vec<_>>();
-    if units.is_empty() {
-        return Some("Enter a name.");
-    }
-    if units.len() > 255 {
-        return Some("Use 255 characters or fewer.");
-    }
-    if units.iter().any(|unit| {
-        *unit < 32
-            || b"<>:\"/\\|?*"
-                .iter()
-                .any(|&symbol| u16::from(symbol) == *unit)
-    }) {
-        return Some("The name contains a character that Windows does not allow.");
-    }
-    if units
-        .last()
-        .is_some_and(|unit| *unit == b' ' as u16 || *unit == b'.' as u16)
-    {
-        return Some("A name cannot end with a space or a period.");
-    }
-    let device = value.to_string_lossy();
-    let device = device
-        .split('.')
-        .next()
-        .unwrap_or_default()
-        .trim_end()
-        .to_ascii_uppercase();
-    if matches!(
-        device.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
-    ) || ["COM", "LPT"].into_iter().any(|prefix| {
-        device.strip_prefix(prefix).is_some_and(|suffix| {
-            matches!(
-                suffix,
-                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
-            )
-        })
-    }) {
-        return Some("Windows reserves this name for a device.");
-    }
-    None
+    crate::directory::filename_issue(&units)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

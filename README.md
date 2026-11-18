@@ -35,6 +35,7 @@ Add `--no-workspace` for a temporary session that starts with the defaults and l
 | Ctrl+A | Select all visible rows in the active file list |
 | Ctrl+F | Focus the active pane's filename filter |
 | Ctrl+1 / Ctrl+2 / Ctrl+3 | Sort by Name / Size / Modified. Repeat to reverse direction |
+| Ctrl+Shift+C | Compare the folders in the two active tabs |
 | Ctrl+P | Open the folder-pair picker |
 | Ctrl+Shift+P | Save the two visible folders as a named pair |
 | F2 | Rename the selected file or folder |
@@ -53,6 +54,16 @@ The lists start in folders-first natural name order. Click **Name**, **Size**, o
 
 Both local and UNC paths work for browsing. Dual Pane watches each open folder for changes and preserves the selected items and viewport when possible. An unsupported or disconnected watch leaves **Ctrl+R** available for a manual refresh. If Windows cannot recycle the selection, it presents a separate warning before a permanent deletion.
 
+## Compare folders
+
+Open **View → Compare folders…** or press **Ctrl+Shift+C**. The comparison uses the immediate contents of both active folders, including entries hidden by a pane filter. Match groups include **Left only**, **Right only**, **Newer on left**, **Newer on right**, and **Same size and time**. Select one matching folder and choose **Open both folders** to compare its contents at the next level.
+
+**Compare contents** checks the bytes of selected regular-file pairs. **Same size and time** describes the metadata. **Contents equal** means the byte check passed. The byte check streams the files in bounded chunks. **Cancel work** stops after an outstanding Windows read returns.
+
+To copy a group, choose it under **Show**, click **Select shown files**, and choose **Review to left** or **Review to right**. The review shows the exact names and distinguishes new files from replacements. **Apply copy** checks both folder identities and rereads the reviewed names and metadata. It blocks a stale review and marks the affected rows when it can identify them. Use **Refresh** to compare again and review the updated selection. Windows handles any replacement confirmation during the copy.
+
+Reviewed copy supports regular files. Name collisions, file/folder conflicts, folders, and reparse points are excluded from batch selection. File metadata and available folder notifications are used for freshness checks.
+
 ## Implementation
 
 Dual Pane uses Rust, Microsoft's `windows` crate, and Win32 common controls. Each pane uses one virtual list view and one folder watcher. Inactive tabs retain navigation state. Background folder enumeration uses a bounded work queue. Large listings show an early batch while the complete folder is read and sorted. Rows use shared Windows icons and format their metadata on demand. Filename filtering and sorting run on the same background workers. Folder watches use asynchronous Windows change notifications and group bursts of changes before rescanning. Copy, move, rename, and recycle use Windows Shell file operations.
@@ -62,6 +73,12 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
+
+## 0.4.0 verification
+
+The Windows x64 release build compared two already-loaded 100,000-entry folders in a median of **102 ms** over three runs. The folders produced 110,000 comparison rows. Private working set was **19.43 MiB** with both folders loaded and **20.81 MiB** with the comparison and a filter open. Windows recorded **0 ms** of process CPU time over 10 seconds at idle. Ordinary warm-cache launch reached first rows in **91 ms** and the full 100,000-entry list in **265 ms**, as medians over five runs.
+
+The desktop test covered files with matching size and timestamp but different contents, canceling and retrying a byte check, a destination changed during review, copying a reviewed selection, and opening matched folders in both panes. Canceling Windows' native replacement prompt preserved the destination file and its name.
 
 ## 0.3.0 verification
 

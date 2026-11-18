@@ -41,6 +41,7 @@ use crate::{
     watch::{Notice, Rename, Watcher},
 };
 
+mod comparison;
 mod navigation;
 mod paint;
 mod pairs;
@@ -58,6 +59,7 @@ const VIEW: u16 = 104;
 const RENAME: u16 = 105;
 const CREATE_FOLDER: u16 = 106;
 const RECYCLE: u16 = 107;
+const COMPARE: u16 = 108;
 const SORT_NAME: u16 = 114;
 const SORT_SIZE: u16 = 115;
 const SORT_MODIFIED: u16 = 116;
@@ -138,6 +140,7 @@ struct Listing {
     pending_reveal: Option<(usize, Vec<u16>)>,
     reveal: Option<(usize, Vec<u16>)>,
     restore: Option<Anchors>,
+    filesystem_changes: usize,
 }
 
 impl Listing {
@@ -205,6 +208,7 @@ struct App {
     events: Receiver<Event>,
     sender: Sender<Event>,
     persist: bool,
+    compare_worker: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Drop for App {
@@ -586,6 +590,7 @@ impl App {
         let menu = unsafe {
             let menu = CreatePopupMenu()?;
             menu_label(menu, REFRESH, w!("&Refresh active pane\tCtrl+R"))?;
+            menu_label(menu, COMPARE, w!("Compare &folders…\tCtrl+Shift+C"))?;
             AppendMenuW(menu, MF_SEPARATOR, 0, None)?;
             menu_label(menu, SORT_NAME, w!("Sort by &name\tCtrl+1"))?;
             menu_label(menu, SORT_SIZE, w!("Sort by si&ze\tCtrl+2"))?;
@@ -625,6 +630,7 @@ impl App {
             events,
             sender,
             persist: workspace.persist,
+            compare_worker: Arc::default(),
         };
         for pane in &app.panes {
             unsafe {
@@ -836,6 +842,7 @@ impl App {
                 reconcile
             }
             Notice::Changed(renames) => {
+                listing.filesystem_changes = listing.filesystem_changes.wrapping_add(1);
                 add_renames(&mut listing.pending_renames, renames);
                 true
             }
@@ -1405,6 +1412,7 @@ impl App {
             RENAME => self.rename(),
             CREATE_FOLDER => self.create_folder(),
             RECYCLE => self.recycle(),
+            COMPARE => self.compare_folders(),
             REFRESH => self.refresh(self.active.get()),
             LEFT_CLEAR => self.clear_filter(0),
             RIGHT_CLEAR => self.clear_filter(1),
@@ -1478,6 +1486,7 @@ impl App {
             VK_W if ctrl => self.close_tab(active),
             VK_P if ctrl && shift => self.save_pair(),
             VK_P if ctrl => self.pick_folder_pair(),
+            VK_C if ctrl && shift => self.compare_folders(),
             VK_L if ctrl => unsafe {
                 let _ = SetFocus(Some(pane.path));
                 send(pane.path, EM_SETSEL, 0, -1);
