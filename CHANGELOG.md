@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.0-rc.6] - 2026-11-18
+
+### Fixed
+
+- The File menu bar and dropdown now follow the effective theme, including Windows dark mode when Filehelm is set to System.
+
 ## [1.0.0-rc.5] - 2026-11-18
 
 ### Added

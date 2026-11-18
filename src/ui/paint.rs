@@ -20,6 +20,17 @@ pub struct Palette {
 }
 
 impl Palette {
+    pub fn menu_colors(&self, selected: bool, disabled: bool) -> (COLORREF, COLORREF) {
+        (
+            if selected {
+                self.active_strip
+            } else {
+                self.surface
+            },
+            if disabled { self.muted } else { self.text },
+        )
+    }
+
     pub fn new(theme: Theme) -> Self {
         let mut light = 1_u32;
         let mut bytes = size_of::<u32>() as u32;
@@ -194,6 +205,7 @@ impl App {
         let background = palette.surface.0 as isize;
         let foreground = palette.text.0 as isize;
         self.palette.replace(palette);
+        self.theme_file_menu(false);
         self.theme_quick_view();
         unsafe {
             let _ = DwmSetWindowAttribute(
@@ -825,7 +837,7 @@ fn inset(rect: RECT, x: i32, y: i32) -> RECT {
     }
 }
 
-fn background(dc: HDC, rect: RECT, color: COLORREF) {
+pub(super) fn background(dc: HDC, rect: RECT, color: COLORREF) {
     unsafe {
         let brush = CreateSolidBrush(color);
         FillRect(dc, &rect, brush);

@@ -242,6 +242,7 @@ struct App {
     undo_history: undo_history::History,
     saved_pairs: RefCell<Vec<SavedPair>>,
     menu: HMENU,
+    file_menu_brush: Cell<HBRUSH>,
     accessibility: Option<IAccPropServices>,
     active: Cell<usize>,
     drive_mask: Cell<Option<u32>>,
@@ -271,6 +272,7 @@ impl Drop for App {
         unsafe {
             let _ = DeleteObject(self.font.get().into());
             let _ = DestroyMenu(self.menu);
+            let _ = DeleteObject(self.file_menu_brush.get().into());
         }
     }
 }
@@ -729,6 +731,7 @@ impl App {
             undo_history: Default::default(),
             saved_pairs: RefCell::new(workspace.pairs.clone()),
             menu,
+            file_menu_brush: Cell::default(),
             accessibility,
             active: Cell::new(0),
             drive_mask: Cell::default(),
@@ -2121,8 +2124,26 @@ unsafe extern "system" fn window_proc(
                 }
                 WM_ERASEBKGND => return LRESULT(1),
                 WM_DRAWITEM => {
-                    app.draw_button(&*(lparam.0 as *const DRAWITEMSTRUCT), app.font.get(), false);
-                    return LRESULT(1);
+                    let item = &*(lparam.0 as *const DRAWITEMSTRUCT);
+                    if item.CtlType == ODT_MENU {
+                        if app.draw_file_menu(item) {
+                            return LRESULT(1);
+                        }
+                    } else {
+                        app.draw_button(item, app.font.get(), false);
+                        return LRESULT(1);
+                    }
+                }
+                WM_MEASUREITEM => {
+                    let item = &mut *(lparam.0 as *mut MEASUREITEMSTRUCT);
+                    if item.CtlType == ODT_MENU && app.measure_file_menu(item) {
+                        return LRESULT(1);
+                    }
+                }
+                WM_MENUCHAR => {
+                    if let Some(result) = app.file_menu_key(wparam.0 as u16, HMENU(lparam.0 as _)) {
+                        return result;
+                    }
                 }
                 WM_CTLCOLOREDIT => {
                     let palette = app.palette.borrow();
@@ -2167,6 +2188,7 @@ unsafe extern "system" fn window_proc(
                         size.bottom - size.top,
                         SWP_NOZORDER | SWP_NOACTIVATE,
                     );
+                    app.theme_file_menu(true);
                     app.layout();
                     return LRESULT(0);
                 }

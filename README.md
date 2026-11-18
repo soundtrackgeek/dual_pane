@@ -10,7 +10,7 @@ Both packages use the same per-user workspace and Undo history, including existi
 
 ## Settings, updates, and version
 
-Open the **File** menu with **Alt+F**. Choose **Settings** to switch between the System, Light, and Dark themes. Filehelm applies the theme when you confirm and saves it with your workspace on exit. Choose **About** to see the version you’re running.
+Open the **File** menu with **Alt+F**. Choose **Settings** to switch between the System, Light, and Dark themes. The File menu and its bar follow the selected theme. In System mode, they follow the Windows app theme. Filehelm applies the theme when you confirm and saves it with your workspace on exit. Choose **About** to see the version you’re running.
 
 Choose **File → Update**, then **Install update**. Filehelm downloads and verifies the update, saves your workspace, and reopens when installation finishes. It runs the MSI for installed copies and replaces only the executable for portable copies. If file operations are active or transfers are queued, finish them and choose **File → Update** again to apply the downloaded update. Stable builds offer stable updates, and prerelease builds also offer newer prereleases.
 
