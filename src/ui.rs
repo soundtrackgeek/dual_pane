@@ -44,6 +44,7 @@ use crate::{
 mod archives;
 mod batch_rename;
 mod comparison;
+mod drives;
 mod file_interop;
 mod find_files;
 mod navigation;
@@ -191,6 +192,7 @@ struct Pane {
     close_tab: HWND,
     back: HWND,
     forward: HWND,
+    drives: drives::DriveStrip,
     path: HWND,
     up: HWND,
     filter: HWND,
@@ -239,6 +241,7 @@ struct App {
     menu: HMENU,
     accessibility: Option<IAccPropServices>,
     active: Cell<usize>,
+    drive_mask: Cell<Option<u32>>,
     dpi: Cell<u32>,
     font: Cell<HFONT>,
     theme: Cell<Theme>,
@@ -398,7 +401,7 @@ fn attach(window: HWND, workspace: &Workspace) -> Result<Box<App>> {
     }
     app.update_font();
     app.apply_theme();
-    app.layout();
+    app.refresh_drives();
     app.rebuild_tabs(0);
     app.rebuild_tabs(1);
     Ok(app)
@@ -505,6 +508,7 @@ impl Pane {
         let close_tab = button(window, w!("×"), LEFT_CLOSE_TAB + index as u16)?;
         let back = button(window, w!("←"), LEFT_BACK + index as u16)?;
         let forward = button(window, w!("→"), LEFT_FORWARD + index as u16)?;
+        let drives = drives::DriveStrip::new(window, index)?;
         let path = child(
             window,
             w!("Edit"),
@@ -589,6 +593,7 @@ impl Pane {
             close_tab,
             back,
             forward,
+            drives,
             path,
             up,
             filter,
@@ -666,6 +671,11 @@ impl App {
         let menu = unsafe {
             let menu = CreatePopupMenu()?;
             menu_label(menu, REFRESH, w!("&Refresh active pane\tCtrl+R"))?;
+            menu_label(
+                menu,
+                drives::DRIVE_MENU,
+                w!("&Drives in active pane…\tCtrl+D"),
+            )?;
             menu_label(menu, FIND_FILES, w!("&Find files…\tAlt+F7"))?;
             menu_label(menu, QUICK_VIEW, w!("&Quick View…\tF3"))?;
             menu_label(menu, BATCH_RENAME, w!("&Batch Rename…\tCtrl+M"))?;
@@ -710,6 +720,7 @@ impl App {
             menu,
             accessibility,
             active: Cell::new(0),
+            drive_mask: Cell::default(),
             dpi: Cell::new(unsafe { GetDpiForWindow(window) }.max(96)),
             font: Cell::new(HFONT::default()),
             theme: Cell::new(workspace.theme),
@@ -838,6 +849,7 @@ impl App {
             query,
             anchors,
         } = place;
+        pane.drives.set_path(&path);
         let filter_text = wide(OsString::from_wide(&query));
         self.kill_timer(SCAN_TIMER + index);
         self.kill_timer(REFRESH_TIMER + index);
@@ -1612,6 +1624,9 @@ impl App {
     }
 
     fn command(&self, command: u16) {
+        if self.drive_button_command(command) {
+            return;
+        }
         match command {
             COPY => self.start_transfer(Transfer::Copy),
             MOVE => self.start_transfer(Transfer::Move),
@@ -1627,7 +1642,10 @@ impl App {
             CLIP_PASTE => self.paste_files(),
             OP_HISTORY => self.show_undo_history(),
             TRANSFERS => self.show_transfers(),
-            REFRESH => self.refresh(self.active.get()),
+            REFRESH => {
+                self.refresh_drives();
+                self.refresh(self.active.get());
+            }
             LEFT_CLEAR => self.clear_filter(0),
             RIGHT_CLEAR => self.clear_filter(1),
             LEFT_NEW_TAB => self.create_tab(0),
@@ -1715,7 +1733,8 @@ impl App {
                 let _ = SetFocus(Some(pane.filter));
                 send(pane.filter, EM_SETSEL, 0, -1);
             },
-            VK_R if ctrl => self.refresh(active),
+            VK_R if ctrl => self.command(REFRESH),
+            VK_D if ctrl && !shift => self.drive_menu(active),
             VK_1 if ctrl => self.sort_by(active, Column::Name),
             VK_2 if ctrl => self.sort_by(active, Column::Size),
             VK_3 if ctrl => self.sort_by(active, Column::Modified),
@@ -2093,6 +2112,16 @@ unsafe extern "system" fn window_proc(
                     app.layout();
                     return LRESULT(0);
                 }
+                WM_DEVICECHANGE
+                    if matches!(
+                        wparam.0 as u32,
+                        DBT_DEVNODES_CHANGED | DBT_DEVICEARRIVAL | DBT_DEVICEREMOVECOMPLETE
+                    ) =>
+                {
+                    app.refresh_drives();
+                    return LRESULT(1);
+                }
+                WM_ACTIVATE if wparam.0 as u16 != WA_INACTIVE as u16 => app.refresh_drives(),
                 WM_TIMER if (SCAN_TIMER..SCAN_TIMER + 2).contains(&wparam.0) => {
                     app.start_initial_scan(wparam.0 - SCAN_TIMER);
                     return LRESULT(0);
@@ -2222,6 +2251,7 @@ mod tests {
         let _apartment = shell::Apartment::enter()?;
         let window = create_window()?;
         let app = attach(window, &Workspace::default())?;
+        app.set_drive_mask((1 << 26) - 1);
         for dpi in [96, 144, 192] {
             let size = RECT {
                 left: 40,
@@ -2239,10 +2269,21 @@ mod tests {
                         Some(WPARAM((dpi | (dpi << 16)) as usize)),
                         Some(LPARAM((&size as *const RECT) as isize)),
                     );
-                    for (pane, list) in app.panes.iter().zip(&mut lists) {
+                    for (index, (pane, list)) in app.panes.iter().zip(&mut lists).enumerate() {
                         let mut path = RECT::default();
+                        let mut tabs = RECT::default();
+                        let mut more = RECT::default();
                         GetWindowRect(pane.path, &mut path)?;
                         GetWindowRect(pane.list, list)?;
+                        GetWindowRect(pane.tabs, &mut tabs)?;
+                        let overflow = GetDlgItem(
+                            Some(window),
+                            i32::from(drives::MORE_DRIVES) + index as i32,
+                        )?;
+                        GetWindowRect(overflow, &mut more)?;
+                        assert!(GetWindowLongW(overflow, GWL_STYLE) as u32 & WS_VISIBLE.0 != 0);
+                        assert!(more.top >= tabs.bottom && more.bottom < path.top);
+                        assert!(more.left >= list.left && more.right <= list.right + 1);
                         assert_eq!(path.bottom - path.top, 20 * dpi / 96);
                         assert!(path.right - path.left >= 60 * dpi / 96);
                         let widths = [0, 1, 2]
@@ -2256,13 +2297,24 @@ mod tests {
                 assert_eq!(lists[0].top, lists[1].top);
                 let mut client = RECT::default();
                 unsafe { GetClientRect(window, &mut client)? };
-                let expected_height =
-                    client.bottom - app.scale(12) - app.scale(59) - app.scale(166);
+                let expected_height = client.bottom
+                    - app.scale(12)
+                    - app.scale(59)
+                    - app.scale(166 + drives::DRIVE_ROW_HEIGHT);
                 assert!(expected_height > 0);
                 for list in lists {
                     assert_eq!(list.bottom - list.top, expected_height);
                 }
             }
+        }
+        app.set_drive_mask(1 << 2);
+        for index in 0..2 {
+            let overflow =
+                unsafe { GetDlgItem(Some(window), i32::from(drives::MORE_DRIVES) + index)? };
+            assert_eq!(
+                unsafe { GetWindowLongW(overflow, GWL_STYLE) } as u32 & WS_VISIBLE.0,
+                0
+            );
         }
         unsafe { DestroyWindow(window)? };
         Ok(())

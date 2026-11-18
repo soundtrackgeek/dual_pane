@@ -29,6 +29,8 @@ To build the installer, portable archive, and SHA-256 checksums locally, run `./
 
 ## Browse and organize files
 
+Click a drive button above a pane’s path field to open that drive’s root in its active tab. The current drive is highlighted. Choose **Drives…** when the buttons overflow, or press **Ctrl+D** to open the active pane’s full drive menu. The list includes local, removable, and mapped drives with Windows drive letters. Filehelm refreshes it when the window regains focus, when Windows reports a device change, and when you press **Ctrl+R**.
+
 | Shortcut | Action |
 | --- | --- |
 | Tab / Shift+Tab | Switch to the opposite pane |
@@ -40,6 +42,7 @@ To build the installer, portable archive, and SHA-256 checksums locally, run `./
 | Esc | Restore the current path while editing, or clear the focused filter and return to the list |
 | Backspace | Go to the parent folder from the file list |
 | Ctrl+R | Refresh the active pane |
+| Ctrl+D | Open the active pane’s drive menu |
 | Ctrl+A | Select all visible rows in the active file list |
 | Ctrl+X / Ctrl+C / Ctrl+V | Cut / copy / paste Windows files and folders in a file list |
 | Ctrl+Z | Review the latest operation with files available for undo |

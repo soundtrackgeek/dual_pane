@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.2] - 2026-11-18
+
+### Added
+
+- Added per-pane drive buttons for assigned drive letters, with the current drive highlighted and an overflow menu for narrow panes.
+- Added Ctrl+D to open the active pane’s drive menu. Drive letters refresh when the app is activated, when Windows reports a device change, and on manual refresh.
+
 ## [1.0.0-rc.1] - 2026-11-18
 
 ### Added

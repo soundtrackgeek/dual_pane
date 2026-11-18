@@ -148,6 +148,7 @@ impl App {
         }
         let previous = self.font.replace(font);
         for pane in &self.panes {
+            pane.drives.font(font);
             for control in [
                 pane.tabs,
                 pane.new_tab,
@@ -274,6 +275,8 @@ impl App {
         });
 
         for (pane, bounds) in self.panes.iter().zip(panes) {
+            pane.drives.layout(self, bounds);
+            let pane_content = bounds.top + s(drives::DRIVE_ROW_HEIGHT);
             let left = bounds.left;
             let right = bounds.right;
             let strip = right - left - s(68);
@@ -299,30 +302,42 @@ impl App {
                 s(29),
                 s(26),
             );
-            place(pane.back, left, bounds.top + s(60), s(30), s(33));
-            place(pane.forward, left + s(35), bounds.top + s(60), s(30), s(33));
+            place(pane.back, left, pane_content + s(60), s(30), s(33));
+            place(
+                pane.forward,
+                left + s(35),
+                pane_content + s(60),
+                s(30),
+                s(33),
+            );
             place(
                 pane.path,
                 left + s(81),
-                bounds.top + s(68),
+                pane_content + s(68),
                 right - left - s(147),
                 s(20),
             );
-            place(pane.up, right - s(53), bounds.top + s(60), s(53), s(33));
+            place(pane.up, right - s(53), pane_content + s(60), s(53), s(33));
             place(
                 pane.filter,
                 left + s(59),
-                bounds.top + s(102),
+                pane_content + s(102),
                 right - left - s(136),
                 s(20),
             );
-            place(pane.clear, right - s(53), bounds.top + s(97), s(53), s(28));
+            place(
+                pane.clear,
+                right - s(53),
+                pane_content + s(97),
+                s(53),
+                s(28),
+            );
             place(
                 pane.list,
                 left + 1,
-                bounds.top + s(136),
+                pane_content + s(136),
                 right - left - 2,
-                bounds.bottom - bounds.top - s(166),
+                bounds.bottom - pane_content - s(166),
             );
             // Reserve the scrollbar width so a newly populated list keeps its columns stable.
             let scroll = unsafe { GetSystemMetricsForDpi(SM_CXVSCROLL, self.dpi.get()) };
@@ -447,17 +462,18 @@ impl App {
                 DT_LEFT,
             );
 
+            let pane_content = bounds.top + s(drives::DRIVE_ROW_HEIGHT);
             let path_frame = RECT {
                 left: bounds.left + s(70),
-                top: bounds.top + s(60),
-                bottom: bounds.top + s(93),
+                top: pane_content + s(60),
+                bottom: pane_content + s(93),
                 right: bounds.right - s(59),
             };
             background(dc, path_frame, p.edge);
             background(dc, inset(path_frame, 1, 1), p.surface);
             let filter = RECT {
-                top: bounds.top + s(97),
-                bottom: bounds.top + s(125),
+                top: pane_content + s(97),
+                bottom: pane_content + s(125),
                 right: bounds.right - s(59),
                 ..bounds
             };
@@ -475,7 +491,7 @@ impl App {
                 DT_LEFT,
             );
             let list_frame = RECT {
-                top: bounds.top + s(135),
+                top: pane_content + s(135),
                 ..bounds
             };
             background(
@@ -634,12 +650,21 @@ impl App {
         let focused = item.itemState.0 & ODS_FOCUS.0 != 0;
         let pressed = item.itemState.0 & ODS_SELECTED.0 != 0;
         let disabled = item.itemState.0 & ODS_DISABLED.0 != 0;
-        let fill = if pressed { p.active_strip } else { p.surface };
+        let current_drive = self.is_current_drive(item.CtlID as u16);
+        let fill = if pressed || current_drive {
+            p.active_strip
+        } else {
+            p.surface
+        };
         let previous_font = unsafe { SelectObject(item.hDC, font.into()) };
         background(
             item.hDC,
             item.rcItem,
-            if focused { p.accent } else { p.edge },
+            if focused || current_drive {
+                p.accent
+            } else {
+                p.edge
+            },
         );
         background(item.hDC, inset(item.rcItem, 1, 1), fill);
         let mut face = wide(window_text(item.hwndItem));
@@ -662,6 +687,16 @@ impl App {
             );
             if focused {
                 let _ = DrawFocusRect(item.hDC, &inset(item.rcItem, 3, 3));
+            }
+            if current_drive {
+                background(
+                    item.hDC,
+                    RECT {
+                        top: item.rcItem.bottom - self.scale(2),
+                        ..item.rcItem
+                    },
+                    p.accent,
+                );
             }
             SelectObject(item.hDC, previous_font);
         }
@@ -762,7 +797,7 @@ impl App {
     }
 }
 
-fn place(control: HWND, x: i32, y: i32, width: i32, height: i32) {
+pub(super) fn place(control: HWND, x: i32, y: i32, width: i32, height: i32) {
     unsafe {
         let _ = SetWindowPos(
             control,
