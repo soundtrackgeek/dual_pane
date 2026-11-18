@@ -191,6 +191,7 @@ impl App {
         let background = palette.surface.0 as isize;
         let foreground = palette.text.0 as isize;
         self.palette.replace(palette);
+        self.theme_quick_view();
         unsafe {
             let _ = DwmSetWindowAttribute(
                 self.window,
@@ -589,33 +590,40 @@ impl App {
         }
     }
 
-    pub fn draw_button(&self, item: &DRAWITEMSTRUCT) {
+    pub fn draw_button(&self, item: &DRAWITEMSTRUCT, font: HFONT, mnemonic: bool) {
         let p = self.palette.borrow();
         let focused = item.itemState.0 & ODS_FOCUS.0 != 0;
         let pressed = item.itemState.0 & ODS_SELECTED.0 != 0;
         let disabled = item.itemState.0 & ODS_DISABLED.0 != 0;
         let fill = if pressed { p.active_strip } else { p.surface };
-        let previous_font = unsafe { SelectObject(item.hDC, self.font.get().into()) };
+        let previous_font = unsafe { SelectObject(item.hDC, font.into()) };
         background(
             item.hDC,
             item.rcItem,
             if focused { p.accent } else { p.edge },
         );
         background(item.hDC, inset(item.rcItem, 1, 1), fill);
-        let face = window_text(item.hwndItem);
-        label(
-            item.hDC,
-            inset(item.rcItem, 4, 0),
-            &face.to_string_lossy(),
-            if disabled { p.edge } else { p.text },
-            DT_CENTER,
-        );
-        if focused {
-            unsafe {
+        let mut face = wide(window_text(item.hwndItem));
+        face.pop();
+        let prefix = if !mnemonic {
+            DT_NOPREFIX
+        } else if item.itemState.0 & ODS_NOACCEL.0 != 0 {
+            DT_HIDEPREFIX
+        } else {
+            DRAW_TEXT_FORMAT(0)
+        };
+        unsafe {
+            SetTextColor(item.hDC, if disabled { p.edge } else { p.text });
+            SetBkMode(item.hDC, TRANSPARENT);
+            DrawTextW(
+                item.hDC,
+                &mut face,
+                &mut inset(item.rcItem, 4, 0),
+                DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_CENTER | prefix,
+            );
+            if focused {
                 let _ = DrawFocusRect(item.hDC, &inset(item.rcItem, 3, 3));
             }
-        }
-        unsafe {
             SelectObject(item.hDC, previous_font);
         }
     }

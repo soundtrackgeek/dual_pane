@@ -10,6 +10,8 @@ mod directory;
 #[cfg(windows)]
 mod find;
 #[cfg(windows)]
+mod preview;
+#[cfg(windows)]
 mod shell;
 #[cfg(windows)]
 mod transfer;

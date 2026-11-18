@@ -47,6 +47,7 @@ mod navigation;
 mod paint;
 mod pairs;
 mod prompt;
+mod quick_view;
 mod transfers;
 mod workspace;
 
@@ -71,6 +72,7 @@ const SYSTEM: u16 = 110;
 const LIGHT: u16 = 111;
 const DARK: u16 = 112;
 const FIND_FILES: u16 = 113;
+const QUICK_VIEW: u16 = 117;
 const LEFT_UP: u16 = 121;
 const RIGHT_UP: u16 = 122;
 const LEFT_CLEAR: u16 = 125;
@@ -95,6 +97,7 @@ enum Event {
     Operation(&'static str, Changes, Result<bool>),
     TransferProgress(u64, crate::transfer::ProgressUpdate),
     TransferFinished(u64, crate::transfer::Report),
+    PreviewFinished(usize, Option<crate::preview::Preview>),
 }
 
 struct Changes {
@@ -200,6 +203,7 @@ struct App {
     transfer_button: HWND,
     transfers: transfers::Transfers,
     find_files: find_files::FindFiles,
+    quick_view: quick_view::QuickView,
     saved_pairs: RefCell<Vec<SavedPair>>,
     menu: HMENU,
     accessibility: Option<IAccPropServices>,
@@ -269,14 +273,18 @@ pub fn run() -> Result<()> {
                 -1 => return Err(windows::core::Error::from_thread()),
                 0 => break,
                 _ => {
-                    if let Some(panel) = [app.transfers.window.get(), app.find_files.window.get()]
-                        .into_iter()
-                        .find(|panel| {
-                            !panel.0.is_null()
-                                && (msg.hwnd == *panel || IsChild(*panel, msg.hwnd).as_bool())
-                        })
-                    {
+                    if let Some(panel) = [
+                        app.transfers.window.get(),
+                        app.find_files.window.get(),
+                        app.quick_view.window.get(),
+                    ]
+                    .into_iter()
+                    .find(|panel| {
+                        !panel.0.is_null()
+                            && (msg.hwnd == *panel || IsChild(*panel, msg.hwnd).as_bool())
+                    }) {
                         if !app.find_panel_key(panel, &msg)
+                            && !app.quick_view_key(panel, &msg)
                             && !IsDialogMessageW(panel, &msg).as_bool()
                         {
                             let _ = TranslateMessage(&msg);
@@ -620,6 +628,7 @@ impl App {
             let menu = CreatePopupMenu()?;
             menu_label(menu, REFRESH, w!("&Refresh active pane\tCtrl+R"))?;
             menu_label(menu, FIND_FILES, w!("&Find files…\tAlt+F7"))?;
+            menu_label(menu, QUICK_VIEW, w!("&Quick View…\tF3"))?;
             menu_label(menu, COMPARE, w!("Compare &folders…\tCtrl+Shift+C"))?;
             menu_label(menu, TRANSFERS, w!("&Transfers\tCtrl+J"))?;
             AppendMenuW(menu, MF_SEPARATOR, 0, None)?;
@@ -646,6 +655,7 @@ impl App {
             transfer_button,
             transfers: Default::default(),
             find_files: Default::default(),
+            quick_view: Default::default(),
             saved_pairs: RefCell::new(workspace.pairs.clone()),
             menu,
             accessibility,
@@ -804,6 +814,7 @@ impl App {
             self.start_initial_scan(index);
         }
         self.status_changed();
+        self.update_quick_view_navigation();
     }
 
     fn timer(&self, id: usize, milliseconds: u32) -> bool {
@@ -1214,6 +1225,7 @@ impl App {
             let _ = InvalidateRect(Some(pane.list), None, false);
         }
         self.status_changed();
+        self.update_quick_view_navigation();
     }
     fn start_transfer(&self, action: Transfer) {
         let index = self.active.get();
@@ -1442,6 +1454,7 @@ impl App {
                 }
                 Event::TransferProgress(id, progress) => self.transfer_progress(id, progress),
                 Event::TransferFinished(id, report) => self.finish_transfer(id, report),
+                Event::PreviewFinished(id, preview) => self.receive_preview(id, preview),
             }
         }
     }
@@ -1455,6 +1468,7 @@ impl App {
             RECYCLE => self.recycle(),
             COMPARE => self.compare_folders(),
             FIND_FILES => self.show_find_files(),
+            QUICK_VIEW => self.show_quick_view(),
             TRANSFERS => self.show_transfers(),
             REFRESH => self.refresh(self.active.get()),
             LEFT_CLEAR => self.clear_filter(0),
@@ -1549,6 +1563,7 @@ impl App {
                 }
             }
             VK_BACK if in_list => self.parent(active),
+            VK_F3 if in_list => self.show_quick_view(),
             VK_F5 => self.start_transfer(Transfer::Copy),
             VK_F6 => self.start_transfer(Transfer::Move),
             VK_F2 if in_list => self.rename(),
@@ -1892,7 +1907,7 @@ unsafe extern "system" fn window_proc(
                 }
                 WM_ERASEBKGND => return LRESULT(1),
                 WM_DRAWITEM => {
-                    app.draw_button(&*(lparam.0 as *const DRAWITEMSTRUCT));
+                    app.draw_button(&*(lparam.0 as *const DRAWITEMSTRUCT), app.font.get(), false);
                     return LRESULT(1);
                 }
                 WM_CTLCOLOREDIT => {

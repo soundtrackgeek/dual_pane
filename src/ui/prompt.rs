@@ -74,10 +74,12 @@ pub(super) fn show_dialog(
 pub(super) fn create_panel(
     owner: HWND,
     size: [i16; 2],
+    style: WINDOW_STYLE,
     procedure: DLGPROC,
     state: LPARAM,
 ) -> Result<HWND> {
-    let template = dialog_template(size);
+    let mut template = dialog_template(size);
+    template.dialog.style |= style.0;
     unsafe {
         let instance = HINSTANCE(GetModuleHandleW(None)?.0);
         CreateDialogIndirectParamW(

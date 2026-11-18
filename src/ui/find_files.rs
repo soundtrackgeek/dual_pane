@@ -136,6 +136,7 @@ impl App {
         match prompt::create_panel(
             self.window,
             [475, 251],
+            WINDOW_STYLE(0),
             Some(panel_proc),
             LPARAM((self as *const App) as isize),
         ) {

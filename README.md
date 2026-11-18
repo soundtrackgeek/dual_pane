@@ -41,6 +41,7 @@ Add `--no-workspace` for a temporary session that starts with the defaults and l
 | Ctrl+P | Open the folder-pair picker |
 | Ctrl+Shift+P | Save the two visible folders as a named pair |
 | F2 | Rename the selected file or folder |
+| F3 | Preview the focused file in Quick View |
 | F5 / F6 | Queue a confirmed copy / move to the opposite pane |
 | F7 | Create a folder in the active pane |
 | Delete | Confirm sending the selection to the Recycle Bin |
@@ -55,6 +56,14 @@ Use **Pairs…** to preview the left and right paths for a saved pair. Opening a
 The lists start in folders-first natural name order. Click **Name**, **Size**, or **Modified** to sort and click the same column again to reverse the order. The filter matches any part of a filename and ignores case. New folder visits start with a clear filter. Back and Forward return to the filter for that visit. The pane footer shows the filtered count and the selected count. Rows hidden by a filter leave the selection.
 
 Both local and UNC paths work for browsing. Dual Pane watches each open folder for changes and preserves the selected items and viewport when possible. An unsupported or disconnected watch leaves **Ctrl+R** available for a manual refresh. If Windows cannot recycle the selection, it presents a separate warning before a permanent deletion.
+
+## Quick View
+
+Focus a file in either pane and press **F3**, or choose **View → Quick View…**. The read-only viewer shows the filename, size, and modified date. Use **Left** and **Right** or **Previous** and **Next** to step through visible files in the source pane. When the text area has focus, use **Alt+Left** or **Alt+Right** to switch files. Press **Esc** to close the viewer. Previewing leaves the pane's selection and scroll position in place.
+
+Quick View shows up to the first **128 KiB** of UTF-8 or BOM-marked UTF-16 text. It fits JPEG, PNG, and the first frame of GIF images to the window and honors JPEG orientation. It reads up to **24 MiB** of compressed image data and caps the preview bitmap at **1,600 pixels** per side. Images over **16 megapixels** require the decoder to supply scaled output. Use **Open** to launch the file's associated app, including for formats outside Quick View's text and image support.
+
+Preview reads run on demand in the background. If a network read stalls, you can close the viewer or switch files. Later results for the original file are discarded. At most two preview workers run at once. If both are waiting on Windows, the newest request waits for a worker.
 
 ## Find files
 
@@ -93,6 +102,12 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
+
+## 0.7.0 verification
+
+Over five warm-cache Windows x64 runs, Quick View showed the excerpt from a **3 GiB** log in a median of **22 ms** and previewed a **48-megapixel** JPEG in **35 ms**. Median private working set was **2.30 MiB** before opening Quick View, **19.22 MiB** at the sampled peak during JPEG decoding, and **2.51 MiB** after closing the viewer. Two 10-second idle samples after closing recorded **0 to 16 ms** of process CPU time.
+
+Native checks covered text, PNG and GIF, JPEG orientation, corrupt and unsupported files, resizing, rapid file changes, and preserving the source selection. A loopback WebDAV test held a preview read open while a local file was previewed. The local preview stayed current when the network response arrived.
 
 ## 0.6.0 verification
 

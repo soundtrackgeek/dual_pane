@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.0] - 2026-11-18
+
+### Added
+
+- Added an F3 Quick View window for read-only text, JPEG, PNG, and GIF previews, with file details and an Open action.
+- Added keyboard navigation through visible files while preserving the source pane's selection and scroll position.
+- Added bounded background reads and image decoding, with superseded previews discarded when switching files or closing the viewer.
+
 ## [0.6.0] - 2026-11-18
 
 ### Added
