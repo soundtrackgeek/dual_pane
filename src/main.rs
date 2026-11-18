@@ -9,6 +9,8 @@ mod directory;
 mod shell;
 #[cfg(windows)]
 mod ui;
+#[cfg(windows)]
+mod watch;
 
 #[cfg(windows)]
 fn main() {

@@ -148,7 +148,7 @@ impl App {
         }
         let previous = self.font.replace(font);
         for pane in &self.panes {
-            for control in [pane.path, pane.up, pane.list] {
+            for control in [pane.path, pane.up, pane.filter, pane.clear, pane.list] {
                 send(control, WM_SETFONT, font.0 as usize, 0);
             }
             let header = send(pane.list, LVM_GETHEADER, 0, 0);
@@ -156,7 +156,14 @@ impl App {
                 send(HWND(header as _), WM_SETFONT, font.0 as usize, 0);
             }
         }
-        for control in [self.copy, self.move_, self.view] {
+        for control in [
+            self.rename,
+            self.copy,
+            self.move_,
+            self.create,
+            self.recycle,
+            self.view,
+        ] {
             send(control, WM_SETFONT, font.0 as usize, 0);
         }
         unsafe {
@@ -261,16 +268,20 @@ impl App {
             );
             place(pane.up, right - s(53), bounds.top + s(29), s(53), s(33));
             place(
+                pane.filter,
+                left + s(59),
+                bounds.top + s(71),
+                right - left - s(136),
+                s(20),
+            );
+            place(pane.clear, right - s(53), bounds.top + s(66), s(53), s(28));
+            place(
                 pane.list,
                 left + 1,
-                bounds.top + s(73),
+                bounds.top + s(105),
                 right - left - 2,
-                bounds.bottom - bounds.top - s(103),
+                bounds.bottom - bounds.top - s(135),
             );
-            let mut list = RECT::default();
-            unsafe {
-                let _ = GetClientRect(pane.list, &mut list);
-            }
             let slim = right - left < s(305);
             let size = if slim { s(61) } else { s(82) };
             let modified = if slim { s(122) } else { s(148) };
@@ -281,14 +292,17 @@ impl App {
                 send(pane.list, LVM_SETCOLUMNWIDTH, column, width as isize);
             }
         }
-        place(self.copy, footer.left, footer.top + s(13), s(114), s(32));
-        place(
-            self.move_,
-            footer.left + s(122),
-            footer.top + s(13),
-            s(114),
-            s(32),
-        );
+        let mut x = footer.left;
+        for (button, width) in [
+            (self.rename, 104),
+            (self.copy, 85),
+            (self.move_, 85),
+            (self.create, 100),
+            (self.recycle, 103),
+        ] {
+            place(button, x, footer.top + s(13), s(width), s(32));
+            x += s(width + 7);
+        }
         place(
             self.view,
             footer.right - s(94),
@@ -362,8 +376,27 @@ impl App {
             };
             background(dc, path_frame, p.edge);
             background(dc, inset(path_frame, 1, 1), p.surface);
+            let filter = RECT {
+                top: bounds.top + s(66),
+                bottom: bounds.top + s(94),
+                right: bounds.right - s(59),
+                ..bounds
+            };
+            background(dc, filter, p.edge);
+            background(dc, inset(filter, 1, 1), p.surface);
+            label(
+                dc,
+                RECT {
+                    left: filter.left + s(10),
+                    right: filter.left + s(55),
+                    ..filter
+                },
+                "Filter",
+                p.muted,
+                DT_LEFT,
+            );
             let list_frame = RECT {
-                top: bounds.top + s(72),
+                top: bounds.top + s(104),
                 ..bounds
             };
             background(dc, list_frame, p.edge);
@@ -375,20 +408,32 @@ impl App {
             background(dc, inset(status_area, 1, 1), p.strip);
             let pane = &self.panes[index];
             let listing = pane.listing.borrow();
-            let total = listing.rows.len();
-            let count = grouped(total as u64);
+            let shown = listing.rows.len();
+            let total = listing.entries.len();
+            let count = grouped(shown as u64);
             let selected = pane.count();
-            let noun = if total == 1 { "item" } else { "items" };
+            let noun = if shown == 1 { "item" } else { "items" };
             let status = if let Some(error) = &listing.error {
                 format!("Could not open folder · {error}")
-            } else if listing.loading && listing.rows.is_empty() {
+            } else if listing.loading && !listing.complete && shown == 0 {
                 "Loading folder…".to_owned()
-            } else if listing.loading {
+            } else if listing.loading && !listing.complete {
                 format!("{count} shown · Loading…")
-            } else if selected != 0 {
-                format!("{count} {noun} · {} selected", grouped(selected as u64))
+            } else if listing.projecting {
+                "Updating view…".to_owned()
             } else {
-                format!("{count} {noun}")
+                let mut status = if listing.query.is_empty() {
+                    format!("{count} {noun}")
+                } else {
+                    format!("{count} of {} items", grouped(total as u64))
+                };
+                if selected != 0 {
+                    status.push_str(&format!(" · {} selected", grouped(selected as u64)));
+                }
+                if listing.watch == WatchState::Unavailable {
+                    status.push_str(" · Ctrl+R to refresh");
+                }
+                status
             };
             label(dc, inset(status_area, s(10), 0), &status, p.muted, DT_LEFT);
         }
@@ -407,9 +452,9 @@ impl App {
                 p.edge,
             );
         }
-        let note = self.transfer_status.borrow();
+        let note = self.operation_status.borrow();
         let area = RECT {
-            left: layout.footer.left + s(250),
+            left: layout.footer.left + s(522),
             right: layout.footer.right - s(107),
             ..layout.footer
         };
@@ -447,7 +492,7 @@ impl App {
         }
     }
 
-    pub(super) fn draw_header(&self, header: &NMCUSTOMDRAW) -> LRESULT {
+    pub(super) fn draw_header(&self, list: HWND, header: &NMCUSTOMDRAW) -> LRESULT {
         let p = self.palette.borrow();
         if p.contrast {
             return LRESULT(CDRF_DODEFAULT as isize);
@@ -478,13 +523,37 @@ impl App {
                     1 => ("Size", DT_RIGHT),
                     _ => ("Modified", DT_LEFT),
                 };
+                let sort = self
+                    .panes
+                    .iter()
+                    .find(|pane| pane.list == list)
+                    .map(|pane| pane.listing.borrow().sort)
+                    .unwrap_or_default();
+                let sorted = sort.column.index() == header.dwItemSpec;
+                let text_rect = if sorted {
+                    RECT {
+                        right: rect.right - self.scale(13),
+                        ..rect
+                    }
+                } else {
+                    rect
+                };
                 label(
                     header.hdc,
-                    inset(rect, self.scale(9), 0),
+                    inset(text_rect, self.scale(9), 0),
                     text,
                     p.muted,
                     align,
                 );
+                if sorted {
+                    label(
+                        header.hdc,
+                        inset(rect, self.scale(5), 0),
+                        if sort.descending { "▾" } else { "▴" },
+                        p.accent,
+                        DT_RIGHT,
+                    );
+                }
                 LRESULT(CDRF_SKIPDEFAULT as isize)
             }
             CDDS_POSTPAINT => {

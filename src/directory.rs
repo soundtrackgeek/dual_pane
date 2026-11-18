@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
 };
@@ -12,6 +12,7 @@ use std::{
 use windows::{
     Win32::{
         Foundation::{ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES, FILETIME, HANDLE, SYSTEMTIME},
+        Globalization::{FIND_FROMSTART, FindStringOrdinal},
         Storage::FileSystem::{
             FILE_ATTRIBUTE_DIRECTORY, FIND_FIRST_EX_LARGE_FETCH, FindClose, FindExInfoBasic,
             FindExSearchNameMatch, FindFirstFileExW, FindNextFileW, WIN32_FIND_DATAW,
@@ -86,26 +87,189 @@ pub fn grouped(number: u64) -> String {
     out
 }
 
-struct Request {
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum Column {
+    #[default]
+    Name,
+    Size,
+    Modified,
+}
+
+impl Column {
+    pub fn from_index(index: usize) -> Option<Self> {
+        [Self::Name, Self::Size, Self::Modified].get(index).copied()
+    }
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct Sort {
+    pub column: Column,
+    pub descending: bool,
+}
+
+#[derive(Default)]
+pub struct Rows {
+    entries: Arc<Vec<Entry>>,
+    order: Option<Vec<usize>>,
+}
+
+impl Rows {
+    pub fn all(entries: Arc<Vec<Entry>>) -> Self {
+        Self {
+            entries,
+            order: None,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.order.as_ref().map_or(self.entries.len(), Vec::len)
+    }
+
+    pub fn get(&self, index: usize) -> Option<&Entry> {
+        match &self.order {
+            Some(order) => order.get(index).map(|&entry| &self.entries[entry]),
+            None => self.entries.get(index),
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Entry> {
+        (0..self.len()).map(|index| self.get(index).unwrap())
+    }
+}
+
+fn project(
+    entries: Arc<Vec<Entry>>,
+    sort: Sort,
+    query: &[u16],
+    current: impl Fn() -> bool,
+) -> Option<Rows> {
+    if !current() {
+        return None;
+    }
+    if sort == Sort::default() && query.is_empty() {
+        return Some(Rows::all(entries));
+    }
+    let mut order = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        if index.is_multiple_of(1024) && !current() {
+            return None;
+        }
+        if query.is_empty()
+            || unsafe {
+                FindStringOrdinal(
+                    FIND_FROMSTART,
+                    &entry.name[..entry.name.len() - 1],
+                    query,
+                    true,
+                ) >= 0
+            }
+        {
+            order.push(index);
+        }
+    }
+    if sort != Sort::default() {
+        order.sort_unstable_by(|&a, &b| {
+            let (left, right) = (&entries[a], &entries[b]);
+            right.directory.cmp(&left.directory).then_with(|| {
+                let key = match sort.column {
+                    Column::Name => a.cmp(&b),
+                    Column::Size if !left.directory => left.size.cmp(&right.size),
+                    Column::Size => std::cmp::Ordering::Equal,
+                    Column::Modified => {
+                        let timestamp = |entry: &Entry| {
+                            (entry.modified.dwHighDateTime, entry.modified.dwLowDateTime)
+                        };
+                        timestamp(left).cmp(&timestamp(right))
+                    }
+                };
+                let key = if sort.descending { key.reverse() } else { key };
+                key.then_with(|| a.cmp(&b))
+            })
+        });
+    }
+    current().then_some(Rows {
+        entries,
+        order: Some(order),
+    })
+}
+
+struct Scan {
     id: usize,
     directory: PathBuf,
     preview: bool,
 }
 
+struct Projection {
+    id: usize,
+    entries: Arc<Vec<Entry>>,
+    sort: Sort,
+    query: Vec<u16>,
+}
+
+enum Job {
+    Scan(Scan),
+    Projection(Projection),
+}
+
+#[derive(Default)]
+struct Pending {
+    scan: Option<Scan>,
+    view: Option<Projection>,
+    stop: bool,
+}
+
 #[derive(Default)]
 struct Queue {
-    latest: AtomicUsize,
-    pending: Mutex<Option<Request>>,
+    scan_id: AtomicUsize,
+    view_id: AtomicUsize,
+    pending: Mutex<Pending>,
     ready: Condvar,
 }
 
 pub struct Scanner(Arc<Queue>);
 
-pub struct Update {
-    pub pane: usize,
-    pub id: usize,
-    pub preview: bool,
-    pub entries: Result<Vec<Entry>, windows::core::Error>,
+pub struct InitialScan {
+    queue: Arc<Queue>,
+    id: usize,
+    directory: PathBuf,
+    claimed: AtomicBool,
+}
+
+impl InitialScan {
+    pub fn start(&self) -> bool {
+        if self.claimed.swap(true, Ordering::Relaxed) {
+            return false;
+        }
+        let mut pending = self.queue.pending.lock().unwrap();
+        if pending.stop || self.queue.scan_id.load(Ordering::Relaxed) != self.id {
+            return false;
+        }
+        pending.scan = Some(Scan {
+            id: self.id,
+            directory: self.directory.clone(),
+            preview: true,
+        });
+        self.queue.ready.notify_one();
+        true
+    }
+}
+
+pub enum Update {
+    Directory {
+        pane: usize,
+        id: usize,
+        preview: bool,
+        entries: Result<Vec<Entry>, windows::core::Error>,
+    },
+    View {
+        pane: usize,
+        id: usize,
+        rows: Rows,
+    },
 }
 
 impl Scanner {
@@ -122,51 +286,119 @@ impl Scanner {
                 .name(format!("directory-{pane}-{index}"))
                 .spawn(move || {
                     loop {
-                        let request = {
+                        let job = {
                             let pending = queue.pending.lock().unwrap();
                             let mut pending = queue
                                 .ready
-                                .wait_while(pending, |request| request.is_none())
+                                .wait_while(pending, |pending| {
+                                    !pending.stop
+                                        && pending.scan.is_none()
+                                        && pending.view.is_none()
+                                })
                                 .unwrap();
-                            pending.take().unwrap()
+                            if pending.stop {
+                                break;
+                            }
+                            pending
+                                .view
+                                .take()
+                                .map(Job::Projection)
+                                .or_else(|| pending.scan.take().map(Job::Scan))
+                                .unwrap()
                         };
-                        let current = || queue.latest.load(Ordering::Relaxed) == request.id;
-                        let publish = |preview, entries| {
-                            if current() {
-                                deliver(Update {
-                                    pane,
-                                    id: request.id,
-                                    preview,
-                                    entries,
+                        match job {
+                            Job::Scan(request) => {
+                                let current =
+                                    || queue.scan_id.load(Ordering::Relaxed) == request.id;
+                                let publish = |preview, entries| {
+                                    if current() {
+                                        deliver(Update::Directory {
+                                            pane,
+                                            id: request.id,
+                                            preview,
+                                            entries,
+                                        });
+                                    }
+                                };
+                                let entries = scan(&request.directory, current, |rows| {
+                                    if request.preview {
+                                        let mut first = rows.to_vec();
+                                        sort(&mut first);
+                                        publish(true, Ok(first));
+                                    }
                                 });
+                                publish(false, entries);
                             }
-                        };
-                        let entries = scan(&request.directory, current, |rows| {
-                            if request.preview {
-                                let mut first = rows.to_vec();
-                                sort(&mut first);
-                                publish(true, Ok(first));
+                            Job::Projection(request) => {
+                                let current =
+                                    || queue.view_id.load(Ordering::Relaxed) == request.id;
+                                if let Some(rows) =
+                                    project(request.entries, request.sort, &request.query, current)
+                                {
+                                    deliver(Update::View {
+                                        pane,
+                                        id: request.id,
+                                        rows,
+                                    });
+                                }
                             }
-                        });
-                        publish(false, entries);
+                        }
                     }
                 })?;
         }
         Ok(Self(queue))
     }
 
-    pub fn request(&self, id: usize, directory: PathBuf, preview: bool) {
+    pub fn prepare_initial(&self, id: usize, directory: PathBuf) -> Arc<InitialScan> {
         let mut pending = self.0.pending.lock().unwrap();
-        self.0.latest.store(id, Ordering::Relaxed);
-        *pending = Some(Request {
+        self.0.scan_id.store(id, Ordering::Relaxed);
+        pending.scan = None;
+        Arc::new(InitialScan {
+            queue: self.0.clone(),
             id,
             directory,
-            preview,
+            claimed: AtomicBool::new(false),
+        })
+    }
+
+    pub fn refresh(&self, id: usize, directory: PathBuf) {
+        let mut pending = self.0.pending.lock().unwrap();
+        self.0.scan_id.store(id, Ordering::Relaxed);
+        pending.scan = Some(Scan {
+            id,
+            directory,
+            preview: false,
         });
         self.0.ready.notify_one();
     }
+
+    pub fn project(&self, id: usize, entries: Arc<Vec<Entry>>, sort: Sort, query: Vec<u16>) {
+        let mut pending = self.0.pending.lock().unwrap();
+        self.0.view_id.store(id, Ordering::Relaxed);
+        pending.view = Some(Projection {
+            id,
+            entries,
+            sort,
+            query,
+        });
+        self.0.ready.notify_one();
+    }
+
+    pub fn cancel_view(&self, id: usize) {
+        let mut pending = self.0.pending.lock().unwrap();
+        self.0.view_id.store(id, Ordering::Relaxed);
+        pending.view = None;
+    }
 }
 
+impl Drop for Scanner {
+    fn drop(&mut self) {
+        self.0.pending.lock().unwrap().stop = true;
+        self.0.scan_id.fetch_add(1, Ordering::Relaxed);
+        self.0.view_id.fetch_add(1, Ordering::Relaxed);
+        self.0.ready.notify_all();
+    }
+}
 fn sort(entries: &mut [Entry]) {
     entries.sort_unstable_by(|left, right| {
         right.directory.cmp(&left.directory).then_with(|| {
@@ -188,7 +420,11 @@ impl Drop for Search {
 }
 
 fn search_pattern(directory: &Path) -> Vec<u16> {
-    let path = wide(directory.join("*"));
+    extended_path(&directory.join("*"))
+}
+
+pub fn extended_path(path: &Path) -> Vec<u16> {
+    let path = wide(path);
     let slash = b'\\' as u16;
     if path.starts_with(&[slash, slash, b'?' as u16, slash])
         || path.starts_with(&[slash, slash, b'.' as u16, slash])
@@ -281,5 +517,63 @@ mod tests {
         assert_eq!(grouped(0), "0");
         assert_eq!(grouped(1000), "1,000");
         assert_eq!(grouped(123456789), "123,456,789");
+    }
+
+    #[test]
+    fn projects_case_insensitive_matches_and_keeps_folders_first() {
+        let entry = |name, directory, size, timestamp| Entry {
+            name: wide(name).into_boxed_slice(),
+            directory,
+            size,
+            modified: FILETIME {
+                dwLowDateTime: timestamp,
+                dwHighDateTime: 0,
+            },
+        };
+        let entries = Arc::new(vec![
+            entry("Tape Folder", true, 0, 0),
+            entry("Book", false, 2, 0),
+            entry("TAPE 1.txt", false, 5, 15),
+            entry("Tæpe 2.txt", false, 90, 30),
+            entry("tape 3.txt", false, 3, 10),
+        ]);
+        let query = [b't' as u16, b'a' as u16, b'p' as u16, b'e' as u16];
+        let names = |rows: Rows| rows.iter().map(Entry::filename).collect::<Vec<_>>();
+        let sort = |column, descending| Sort { column, descending };
+        assert_eq!(
+            names(project(entries.clone(), sort(Column::Size, false), &query, || true).unwrap()),
+            ["Tape Folder", "tape 3.txt", "TAPE 1.txt"],
+        );
+        assert_eq!(
+            names(
+                project(
+                    entries.clone(),
+                    sort(Column::Modified, true),
+                    &query,
+                    || true
+                )
+                .unwrap()
+            ),
+            ["Tape Folder", "TAPE 1.txt", "tape 3.txt"],
+        );
+        assert!(project(entries.clone(), Sort::default(), &query, || false).is_none());
+        let all = project(entries.clone(), Sort::default(), &[], || true).unwrap();
+        assert!(Arc::ptr_eq(&entries, &all.entries));
+        assert!(all.order.is_none());
+    }
+
+    #[test]
+    fn initial_scan_starts_once_and_ignores_superseded_paths() {
+        let scanner = Scanner(Arc::new(Queue::default()));
+        let first = scanner.prepare_initial(1, PathBuf::from(r"C:\First"));
+        let second = scanner.prepare_initial(2, PathBuf::from(r"C:\Second"));
+        assert!(!first.start());
+        assert!(second.start());
+        assert!(!second.start());
+        let pending = scanner.0.pending.lock().unwrap();
+        assert_eq!(
+            pending.scan.as_ref().unwrap().directory,
+            Path::new(r"C:\Second")
+        );
     }
 }

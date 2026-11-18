@@ -2,9 +2,12 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashSet,
     ffi::{OsString, c_void},
-    os::windows::ffi::OsStringExt,
+    os::windows::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, Sender},
+    },
     thread,
 };
 
@@ -33,41 +36,111 @@ use windows::{
 };
 
 use crate::{
-    directory::{Entry, Scanner, Update, grouped, wide},
-    shell::{self, Icons, Transfer},
+    directory::{Column, Entry, InitialScan, Rows, Scanner, Sort, Update, grouped, wide},
+    shell::{self, Icons, Operation, Transfer},
+    watch::{Notice, Rename, Watcher},
 };
 
 mod paint;
+mod prompt;
+mod workspace;
+
+use workspace::Workspace;
 
 const WAKE: u32 = WM_APP + 1;
 const COPY: u16 = 101;
 const MOVE: u16 = 102;
 const REFRESH: u16 = 103;
 const VIEW: u16 = 104;
+const RENAME: u16 = 105;
+const CREATE_FOLDER: u16 = 106;
+const RECYCLE: u16 = 107;
+const SORT_NAME: u16 = 114;
+const SORT_SIZE: u16 = 115;
+const SORT_MODIFIED: u16 = 116;
 const SYSTEM: u16 = 110;
 const LIGHT: u16 = 111;
 const DARK: u16 = 112;
 const LEFT_UP: u16 = 121;
 const RIGHT_UP: u16 = 122;
+const LEFT_CLEAR: u16 = 125;
+const RIGHT_CLEAR: u16 = 126;
+const LEFT_FILTER: u16 = 151;
+const RIGHT_FILTER: u16 = 152;
+const SCAN_TIMER: usize = 200;
+const REFRESH_TIMER: usize = 210;
 
 enum Event {
     Directory(Update),
-    Transfer(Transfer, [PathBuf; 2], Result<bool>),
+    Watch(usize, usize, Notice),
+    Operation(&'static str, Changes, Result<bool>),
 }
 
+struct Changes {
+    folders: Vec<PathBuf>,
+    rename: Option<Rename>,
+    reveal: Option<(usize, usize, usize, Vec<u16>)>,
+}
+
+impl Changes {
+    fn folder(folder: PathBuf) -> Self {
+        Self {
+            folders: vec![folder],
+            rename: None,
+            reveal: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum WatchState {
+    #[default]
+    Pending,
+    Active,
+    Unavailable,
+}
+
+#[derive(Default)]
 struct Listing {
     path: PathBuf,
+    location: usize,
     request: usize,
-    rows: Vec<Entry>,
+    view_request: usize,
+    entries: Arc<Vec<Entry>>,
+    rows: Rows,
+    sort: Sort,
+    query: Vec<u16>,
     loading: bool,
+    complete: bool,
+    projecting: bool,
+    keep_viewport: bool,
     error: Option<String>,
+    watch: WatchState,
+    initial: Option<Arc<InitialScan>>,
+    refresh_pending: bool,
+    dirty: bool,
+    pending_renames: Vec<Rename>,
+    scan_renames: Vec<Rename>,
+    display_renames: Vec<Rename>,
+    selection_epoch: usize,
+    pending_reveal: Option<(usize, Vec<u16>)>,
+    reveal: Option<(usize, Vec<u16>)>,
+}
+
+impl Listing {
+    fn ready(&self) -> bool {
+        self.complete && !self.projecting && self.error.is_none()
+    }
 }
 
 struct Pane {
     path: HWND,
     up: HWND,
+    filter: HWND,
+    clear: HWND,
     list: HWND,
     scanner: Scanner,
+    watcher: Watcher,
     listing: RefCell<Listing>,
 }
 
@@ -90,6 +163,9 @@ struct App {
     panes: [Pane; 2],
     copy: HWND,
     move_: HWND,
+    rename: HWND,
+    create: HWND,
+    recycle: HWND,
     view: HWND,
     menu: HMENU,
     accessibility: Option<IAccPropServices>,
@@ -103,10 +179,11 @@ struct App {
     dragging: Cell<bool>,
     changing_rows: Cell<bool>,
     icons: Option<Icons>,
-    transfer_active: Cell<bool>,
-    transfer_status: RefCell<String>,
+    operation_active: Cell<bool>,
+    operation_status: RefCell<String>,
     events: Receiver<Event>,
     sender: Sender<Event>,
+    persist: bool,
 }
 
 impl Drop for App {
@@ -142,12 +219,13 @@ fn message(owner: HWND, title: &str, text: &str, style: MESSAGEBOX_STYLE) -> MES
 
 pub fn run() -> Result<()> {
     let _apartment = shell::Apartment::enter()?;
+    let workspace = Workspace::startup();
     unsafe {
         let window = create_window()?;
-        let app = attach(window)?;
-        let (left, right) = initial_paths();
-        app.navigate(0, left, false);
-        app.navigate(1, right, false);
+        let app = attach(window, &workspace)?;
+        let [left, right] = workspace.paths;
+        app.navigate(0, left);
+        app.navigate(1, right);
         let _ = ShowWindow(window, SW_SHOW);
         app.focus_list(0);
 
@@ -215,29 +293,18 @@ fn create_window() -> Result<HWND> {
     }
 }
 
-fn attach(window: HWND) -> Result<Box<App>> {
-    let app = Box::new(App::new(window)?);
+fn attach(window: HWND, workspace: &Workspace) -> Result<Box<App>> {
+    let app = Box::new(App::new(window, workspace)?);
     unsafe {
         SetWindowLongPtrW(window, GWLP_USERDATA, (&*app as *const App) as isize);
     }
     app.update_font();
     app.apply_theme();
     app.layout();
+    app.update_sort_header(0);
+    app.update_sort_header(1);
     Ok(app)
 }
-fn initial_paths() -> (PathBuf, PathBuf) {
-    let mut args = std::env::args_os().skip(1);
-    let home = std::env::var_os("USERPROFILE").map(PathBuf::from);
-    let current = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(r"C:\"));
-    let left = args
-        .next()
-        .map(PathBuf::from)
-        .or(home)
-        .unwrap_or_else(|| current.clone());
-    let right = args.next().map(PathBuf::from).unwrap_or(current);
-    (left, right)
-}
-
 fn child(window: HWND, class: PCWSTR, label: PCWSTR, style: WINDOW_STYLE, id: u16) -> Result<HWND> {
     unsafe {
         CreateWindowExW(
@@ -276,8 +343,10 @@ fn name_accessible_controls(panes: &[Pane; 2]) -> Option<IAccPropServices> {
         unsafe { CoCreateInstance(&CLSID_AccPropServices, None, CLSCTX_INPROC_SERVER) }.ok()?;
     for (control, name) in [
         (panes[0].path, w!("Left folder path")),
+        (panes[0].filter, w!("Filter left folder by filename")),
         (panes[0].list, w!("Left folder contents")),
         (panes[1].path, w!("Right folder path")),
+        (panes[1].filter, w!("Filter right folder by filename")),
         (panes[1].list, w!("Right folder contents")),
     ] {
         for property in [Name_Property_GUID, PROPID_ACC_NAME] {
@@ -301,6 +370,7 @@ impl Pane {
         index: usize,
         sender: Sender<Event>,
         icons: Option<&Icons>,
+        sort: Sort,
     ) -> Result<Self> {
         let path = child(
             window,
@@ -310,17 +380,22 @@ impl Pane {
             131 + index as u16,
         )?;
         let up = button(window, w!("Up"), LEFT_UP + index as u16)?;
+        let filter = child(
+            window,
+            w!("Edit"),
+            PCWSTR::null(),
+            WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+            LEFT_FILTER + index as u16,
+        )?;
+        let clear = button(window, w!("Clear"), LEFT_CLEAR + index as u16)?;
+        send(filter, EM_SETLIMITTEXT, 255, 0);
         let list = child(
             window,
             WC_LISTVIEWW,
             PCWSTR::null(),
             WS_TABSTOP
                 | WINDOW_STYLE(
-                    LVS_REPORT
-                        | LVS_OWNERDATA
-                        | LVS_SHOWSELALWAYS
-                        | LVS_NOSORTHEADER
-                        | LVS_SHAREIMAGELISTS,
+                    LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS,
                 ),
             141 + index as u16,
         )?;
@@ -363,23 +438,29 @@ impl Pane {
             );
         }
         let owner = window.0 as usize;
+        let scan_sender = sender.clone();
         let scanner = Scanner::start(index, move |update| {
-            if sender.send(Event::Directory(update)).is_ok() {
+            if scan_sender.send(Event::Directory(update)).is_ok() {
                 wake(owner);
             }
         })
         .map_err(|error| windows::core::Error::new(E_FAIL, error.to_string()))?;
+        let watcher = Watcher::start(index, move |id, notice| {
+            if sender.send(Event::Watch(index, id, notice)).is_ok() {
+                wake(owner);
+            }
+        })?;
         Ok(Self {
             path,
             up,
+            filter,
+            clear,
             list,
             scanner,
+            watcher,
             listing: RefCell::new(Listing {
-                path: PathBuf::new(),
-                request: 0,
-                rows: Vec::new(),
-                loading: true,
-                error: None,
+                sort,
+                ..Listing::default()
             }),
         })
     }
@@ -392,6 +473,16 @@ impl Pane {
         let listing = self.listing.borrow();
         let row = listing.rows.get(index as usize)?;
         Some((listing.path.join(row.filename()), row.directory))
+    }
+
+    fn selected_paths(&self) -> (PathBuf, Vec<PathBuf>) {
+        let listing = self.listing.borrow();
+        let paths = self
+            .selection()
+            .filter_map(|row| listing.rows.get(row))
+            .map(|row| listing.path.join(row.filename()))
+            .collect();
+        (listing.path.clone(), paths)
     }
 
     fn selection(&self) -> impl Iterator<Item = usize> + '_ {
@@ -409,19 +500,26 @@ impl Pane {
 }
 
 impl App {
-    fn new(window: HWND) -> Result<Self> {
+    fn new(window: HWND, workspace: &Workspace) -> Result<Self> {
         let (sender, events) = mpsc::channel();
         let icons = Icons::load();
         let panes = [
-            Pane::new(window, 0, sender.clone(), icons.as_ref())?,
-            Pane::new(window, 1, sender.clone(), icons.as_ref())?,
+            Pane::new(window, 0, sender.clone(), icons.as_ref(), workspace.sort[0])?,
+            Pane::new(window, 1, sender.clone(), icons.as_ref(), workspace.sort[1])?,
         ];
         let copy = button(window, w!("F5   Copy"), COPY)?;
         let move_ = button(window, w!("F6   Move"), MOVE)?;
+        let rename = button(window, w!("F2   Rename"), RENAME)?;
+        let create = button(window, w!("F7   Folder"), CREATE_FOLDER)?;
+        let recycle = button(window, w!("Del   Recycle"), RECYCLE)?;
         let view = button(window, w!("View   ▾"), VIEW)?;
         let menu = unsafe {
             let menu = CreatePopupMenu()?;
             menu_label(menu, REFRESH, w!("&Refresh active pane\tCtrl+R"))?;
+            AppendMenuW(menu, MF_SEPARATOR, 0, None)?;
+            menu_label(menu, SORT_NAME, w!("Sort by &name\tCtrl+1"))?;
+            menu_label(menu, SORT_SIZE, w!("Sort by si&ze\tCtrl+2"))?;
+            menu_label(menu, SORT_MODIFIED, w!("Sort by &modified\tCtrl+3"))?;
             AppendMenuW(menu, MF_SEPARATOR, 0, None)?;
             menu_label(menu, SYSTEM, w!("&System theme"))?;
             menu_label(menu, LIGHT, w!("&Light theme"))?;
@@ -434,23 +532,27 @@ impl App {
             panes,
             copy,
             move_,
+            rename,
+            create,
+            recycle,
             view,
             menu,
             accessibility,
             active: Cell::new(0),
             dpi: Cell::new(unsafe { GetDpiForWindow(window) }.max(96)),
             font: Cell::new(HFONT::default()),
-            theme: Cell::new(Theme::System),
-            palette: RefCell::new(paint::Palette::new(Theme::System)),
+            theme: Cell::new(workspace.theme),
+            palette: RefCell::new(paint::Palette::new(workspace.theme)),
             layout: Cell::new(Layout::default()),
-            split: Cell::new(0.5),
+            split: Cell::new(workspace.split),
             dragging: Cell::new(false),
             changing_rows: Cell::new(false),
             icons,
-            transfer_active: Cell::new(false),
-            transfer_status: RefCell::new(String::new()),
+            operation_active: Cell::new(false),
+            operation_status: RefCell::new(String::new()),
             events,
             sender,
+            persist: workspace.persist,
         };
         for pane in &app.panes {
             unsafe {
@@ -475,17 +577,27 @@ impl App {
         let source = self.active.get();
         let destination = self.panes[1 - source].listing.borrow();
         let origin = self.panes[source].listing.borrow();
-        let enabled = !self.transfer_active.get()
-            && !destination.loading
+        let ready = !self.operation_active.get() && origin.ready();
+        let selected = self.panes[source].count();
+        let enabled = ready
+            && destination.complete
             && destination.error.is_none()
-            && !origin.loading
             && origin.path != destination.path
-            && self.panes[source].count() > 0;
+            && selected > 0;
         drop(origin);
         drop(destination);
         unsafe {
             let _ = EnableWindow(self.copy, enabled);
             let _ = EnableWindow(self.move_, enabled);
+            let _ = EnableWindow(self.rename, ready && selected == 1);
+            let _ = EnableWindow(self.create, ready);
+            let _ = EnableWindow(self.recycle, ready && selected > 0);
+        }
+        for pane in &self.panes {
+            let clear = !pane.listing.borrow().query.is_empty();
+            unsafe {
+                let _ = EnableWindow(pane.clear, clear);
+            }
         }
     }
 
@@ -505,61 +617,177 @@ impl App {
         }
     }
 
-    fn navigate(&self, index: usize, path: PathBuf, refresh: bool) {
+    fn navigate(&self, index: usize, path: PathBuf) {
         let pane = &self.panes[index];
-        let absolute = std::path::absolute(path);
-        let Ok(path) = absolute else {
-            let error = absolute.unwrap_err();
-            message(
-                self.window,
-                "Invalid path",
-                &error.to_string(),
-                MB_OK | MB_ICONWARNING,
-            );
-            return;
-        };
-        let id = {
-            let mut listing = pane.listing.borrow_mut();
-            listing.request = listing.request.wrapping_add(1);
-            listing.loading = true;
-            listing.error = None;
-            listing.path.clone_from(&path);
-            if !refresh {
-                listing.rows = Vec::new();
+        let path = match std::path::absolute(path) {
+            Ok(path) => path,
+            Err(error) => {
+                message(
+                    self.window,
+                    "Invalid path",
+                    &error.to_string(),
+                    MB_OK | MB_ICONWARNING,
+                );
+                return;
             }
-            listing.request
         };
-        if !refresh {
-            self.changing_rows.set(true);
-            send(pane.list, LVM_SETITEMCOUNT, 0, 0);
-            self.changing_rows.set(false);
-            show_path(pane.path, &path);
-        }
-        let parent = parent_of(&path).is_some();
+        self.kill_timer(SCAN_TIMER + index);
+        self.kill_timer(REFRESH_TIMER + index);
+        let (location, initial) = {
+            let mut listing = pane.listing.borrow_mut();
+            let request = listing.request.wrapping_add(1);
+            let initial = pane.scanner.prepare_initial(request, path.clone());
+            *listing = Listing {
+                path: path.clone(),
+                location: listing.location.wrapping_add(1),
+                request,
+                view_request: listing.view_request.wrapping_add(1),
+                sort: listing.sort,
+                loading: true,
+                initial: Some(initial.clone()),
+                ..Listing::default()
+            };
+            pane.scanner.cancel_view(listing.view_request);
+            (listing.location, initial)
+        };
+        self.changing_rows.set(true);
+        send(pane.list, LVM_SETITEMCOUNT, 0, 0);
+        self.changing_rows.set(false);
+        show_path(pane.path, &path);
         unsafe {
-            let _ = EnableWindow(pane.up, parent);
+            let _ = SetWindowTextW(pane.filter, w!(""));
+            let _ = EnableWindow(pane.up, parent_of(&path).is_some());
         }
-        pane.scanner.request(id, path, !refresh);
+        pane.watcher.watch(location, path, Some(initial));
+        // Give the watch a chance to arm before enumerating. A slow or unsupported
+        // watch never gets to hold up directory browsing.
+        if !self.timer(SCAN_TIMER + index, 75) {
+            self.start_initial_scan(index);
+        }
         self.status_changed();
     }
 
+    fn timer(&self, id: usize, milliseconds: u32) -> bool {
+        unsafe { SetTimer(Some(self.window), id, milliseconds, None) != 0 }
+    }
+
+    fn kill_timer(&self, id: usize) {
+        unsafe {
+            let _ = KillTimer(Some(self.window), id);
+        }
+    }
+
+    fn start_initial_scan(&self, index: usize) {
+        let pane = &self.panes[index];
+        self.kill_timer(SCAN_TIMER + index);
+        if let Some(initial) = pane.listing.borrow_mut().initial.take() {
+            initial.start();
+        }
+    }
+
+    fn queue_refresh(&self, index: usize) {
+        let pane = &self.panes[index];
+        let mut listing = pane.listing.borrow_mut();
+        listing.dirty = true;
+        if listing.loading || listing.refresh_pending {
+            return;
+        }
+        listing.refresh_pending = self.timer(REFRESH_TIMER + index, 100);
+        let queued = listing.refresh_pending;
+        drop(listing);
+        if !queued {
+            self.scan_dirty_folder(index);
+        }
+    }
+
+    fn scan_dirty_folder(&self, index: usize) {
+        self.kill_timer(REFRESH_TIMER + index);
+        let mut listing = self.panes[index].listing.borrow_mut();
+        listing.refresh_pending = false;
+        let scan = listing.dirty && !listing.loading;
+        drop(listing);
+        if scan {
+            self.scan_folder(index);
+        }
+    }
+
+    fn scan_folder(&self, index: usize) {
+        let pane = &self.panes[index];
+        self.kill_timer(REFRESH_TIMER + index);
+        let mut listing = pane.listing.borrow_mut();
+        listing.request = listing.request.wrapping_add(1);
+        listing.loading = true;
+        listing.dirty = false;
+        listing.refresh_pending = false;
+        let pending = std::mem::take(&mut listing.pending_renames);
+        add_renames(&mut listing.scan_renames, pending);
+        pane.scanner.refresh(listing.request, listing.path.clone());
+        drop(listing);
+        self.status_changed();
+    }
+
+    fn receive_watch(&self, index: usize, location: usize, notice: Notice) {
+        let mut listing = self.panes[index].listing.borrow_mut();
+        if listing.location != location {
+            return;
+        }
+        let initial = listing.initial.is_some();
+        let refresh = match notice {
+            Notice::Armed { reconcile } => {
+                listing.watch = WatchState::Active;
+                reconcile
+            }
+            Notice::Changed(renames) => {
+                add_renames(&mut listing.pending_renames, renames);
+                true
+            }
+            Notice::Unavailable => {
+                let was_active = listing.watch == WatchState::Active;
+                listing.watch = WatchState::Unavailable;
+                was_active
+            }
+        };
+        drop(listing);
+        if initial {
+            self.start_initial_scan(index);
+        }
+        if refresh {
+            self.queue_refresh(index);
+        }
+        self.status_changed();
+    }
     fn parent(&self, index: usize) {
         let parent = parent_of(&self.panes[index].listing.borrow().path);
         if let Some(parent) = parent {
-            self.navigate(index, parent, false);
+            self.navigate(index, parent);
         }
         self.focus_list(index);
     }
 
     fn refresh(&self, index: usize) {
-        let path = self.panes[index].listing.borrow().path.clone();
-        self.navigate(index, path, true);
+        let pane = &self.panes[index];
+        let mut listing = pane.listing.borrow_mut();
+        if listing.initial.is_some() {
+            drop(listing);
+            self.start_initial_scan(index);
+            return;
+        }
+        if listing.watch == WatchState::Unavailable {
+            listing.watch = WatchState::Pending;
+            pane.watcher
+                .watch(listing.location, listing.path.clone(), None);
+        }
+        drop(listing);
+        self.scan_folder(index);
     }
-
     fn open_row(&self, index: usize, row: isize) {
-        if let Some((path, directory)) = self.panes[index].item(row) {
+        let pane = &self.panes[index];
+        if pane.listing.borrow().projecting {
+            return;
+        }
+        if let Some((path, directory)) = pane.item(row) {
             if directory {
-                self.navigate(index, path, false);
+                self.navigate(index, path);
             } else if let Err(error) = shell::open(self.window, &path) {
                 message(
                     self.window,
@@ -571,78 +799,246 @@ impl App {
         }
     }
 
-    fn receive_directory(&self, update: Update) {
-        let pane = &self.panes[update.pane];
-        if pane.listing.borrow().request != update.id {
+    fn receive_directory(
+        &self,
+        index: usize,
+        id: usize,
+        preview: bool,
+        entries: Result<Vec<Entry>>,
+    ) {
+        let mut listing = self.panes[index].listing.borrow_mut();
+        if listing.request != id {
             return;
         }
-        let focused = send(
+        listing.loading = preview;
+        let changed = match entries {
+            Ok(entries) => {
+                listing.entries = Arc::new(entries);
+                listing.complete = !preview;
+                listing.error = None;
+                if !preview {
+                    let aliases = std::mem::take(&mut listing.scan_renames);
+                    add_renames(&mut listing.display_renames, aliases);
+                    if let Some(reveal) = listing.pending_reveal.take() {
+                        listing.reveal = Some(reveal);
+                    }
+                }
+                true
+            }
+            Err(error) => {
+                listing.error = Some(error.message().trim().to_owned());
+                false
+            }
+        };
+        let dirty = listing.dirty;
+        drop(listing);
+        if changed {
+            self.request_view(index, true);
+        }
+        if dirty && !preview {
+            self.queue_refresh(index);
+        }
+        self.status_changed();
+    }
+
+    fn filter_changed(&self, index: usize) {
+        let pane = &self.panes[index];
+        let mut query = wide(window_text(pane.filter));
+        query.pop();
+        let mut listing = pane.listing.borrow_mut();
+        if listing.query == query {
+            return;
+        }
+        listing.query = query;
+        drop(listing);
+        self.request_view(index, false);
+    }
+
+    fn clear_filter(&self, index: usize) {
+        unsafe {
+            let _ = SetWindowTextW(self.panes[index].filter, w!(""));
+        }
+        self.focus_list(index);
+    }
+
+    fn sort_by(&self, index: usize, column: Column) {
+        let pane = &self.panes[index];
+        let mut listing = pane.listing.borrow_mut();
+        let descending = if listing.sort.column == column {
+            !listing.sort.descending
+        } else {
+            column == Column::Modified
+        };
+        listing.sort = Sort { column, descending };
+        drop(listing);
+        self.update_sort_header(index);
+        self.request_view(index, false);
+    }
+
+    fn update_sort_header(&self, index: usize) {
+        let pane = &self.panes[index];
+        let sort = pane.listing.borrow().sort;
+        let header = HWND(send(pane.list, LVM_GETHEADER, 0, 0) as _);
+        for column in 0..3 {
+            let mut item = HDITEMW {
+                mask: HDI_FORMAT,
+                ..Default::default()
+            };
+            if send(
+                header,
+                HDM_GETITEMW,
+                column,
+                (&mut item as *mut HDITEMW) as isize,
+            ) != 0
+            {
+                item.fmt.0 &= !(HDF_SORTUP.0 | HDF_SORTDOWN.0);
+                if sort.column.index() == column {
+                    item.fmt.0 |= if sort.descending {
+                        HDF_SORTDOWN.0
+                    } else {
+                        HDF_SORTUP.0
+                    };
+                }
+                send(
+                    header,
+                    HDM_SETITEMW,
+                    column,
+                    (&item as *const HDITEMW) as isize,
+                );
+            }
+        }
+        unsafe {
+            let _ = InvalidateRect(Some(header), None, false);
+        }
+    }
+
+    fn request_view(&self, index: usize, keep_viewport: bool) {
+        let pane = &self.panes[index];
+        let mut listing = pane.listing.borrow_mut();
+        listing.view_request = listing.view_request.wrapping_add(1);
+        let id = listing.view_request;
+        let entries = listing.entries.clone();
+        let sort = listing.sort;
+        let query = listing.query.clone();
+        listing.projecting = !entries.is_empty() && (sort != Sort::default() || !query.is_empty());
+        listing.keep_viewport = keep_viewport;
+        let projecting = listing.projecting;
+        drop(listing);
+        if projecting {
+            pane.scanner.project(id, entries, sort, query);
+            self.status_changed();
+        } else {
+            pane.scanner.cancel_view(id);
+            self.apply_rows(index, Rows::all(entries));
+        }
+    }
+
+    fn apply_rows(&self, index: usize, rows: Rows) {
+        let pane = &self.panes[index];
+        let native_focus = send(
             pane.list,
             LVM_GETNEXTITEM,
             usize::MAX,
             LVNI_FOCUSED as isize,
         );
-        let top = send(pane.list, LVM_GETTOPINDEX, 0, 0);
-        let (selected, focused, top) = {
-            let listing = pane.listing.borrow();
-            let name_at =
-                |index: isize| listing.rows.get(index as usize).map(|row| row.name.clone());
-            let selected = pane
-                .selection()
-                .filter_map(|index| name_at(index as isize))
-                .collect::<HashSet<_>>();
-            (selected, name_at(focused), name_at(top))
+        let native_top = send(pane.list, LVM_GETTOPINDEX, 0, 0);
+        let listing = pane.listing.borrow();
+        let name_at = |row: isize| {
+            listing
+                .rows
+                .get(row as usize)
+                .map(|row| renamed(&row.name, &listing.display_renames))
         };
-        let mut listing = pane.listing.borrow_mut();
-        listing.loading = update.preview;
-        match update.entries {
-            Ok(rows) => listing.rows = rows,
-            Err(error) => {
-                listing.rows = Vec::new();
-                listing.error = Some(error.message().trim().to_owned());
-            }
-        }
-        let total = listing.rows.len();
+        let selected = pane
+            .selection()
+            .filter_map(|row| name_at(row as isize))
+            .collect::<HashSet<_>>();
+        let focused = if listing.keep_viewport || !selected.is_empty() {
+            name_at(native_focus)
+        } else {
+            None
+        };
+        let top = if listing.keep_viewport {
+            name_at(native_top)
+        } else {
+            None
+        };
+        let reveal = listing
+            .reveal
+            .as_ref()
+            .filter(|(epoch, _)| *epoch == listing.selection_epoch)
+            .map(|(_, name)| name.as_slice());
+        let total = rows.len();
+        let keep_viewport = listing.keep_viewport;
         let mut selected_rows = Vec::new();
         let mut focused_row = None;
         let mut top_row = None;
-        if !selected.is_empty() || focused.is_some() || top.is_some() {
-            for (index, row) in listing.rows.iter().enumerate() {
-                if selected.contains(&row.name) {
-                    selected_rows.push(index);
+        let mut reveal_row = None;
+        if !selected.is_empty() || focused.is_some() || top.is_some() || reveal.is_some() {
+            for (row, entry) in rows.iter().enumerate() {
+                if selected.contains(entry.name.as_ref()) {
+                    selected_rows.push(row);
                 }
-                if focused.as_deref() == Some(&row.name) {
-                    focused_row = Some(index);
+                if focused == Some(entry.name.as_ref()) {
+                    focused_row = Some(row);
                 }
-                if top.as_deref() == Some(&row.name) {
-                    top_row = Some(index);
+                if top == Some(entry.name.as_ref()) {
+                    top_row = Some(row);
+                }
+                if reveal == Some(entry.name.as_ref()) {
+                    reveal_row = Some(row);
                 }
             }
         }
         drop(listing);
+        {
+            let mut listing = pane.listing.borrow_mut();
+            listing.rows = rows;
+            listing.projecting = false;
+            listing.display_renames.clear();
+            listing.reveal = None;
+        }
         self.changing_rows.set(true);
-        let selection_matches_all = total > 0 && selected_rows.len() == total;
         item_state(
             pane.list,
             usize::MAX,
             LIST_VIEW_ITEM_STATE_FLAGS(0),
-            LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0),
+            LVIS_SELECTED,
         );
+        if native_focus >= 0 {
+            item_state(
+                pane.list,
+                native_focus as usize,
+                LIST_VIEW_ITEM_STATE_FLAGS(0),
+                LVIS_FOCUSED,
+            );
+        }
         send(pane.list, LVM_SETITEMCOUNT, total, LVSICF_NOSCROLL as isize);
-        if selection_matches_all {
+        if let Some(row) = reveal_row {
+            item_state(pane.list, row, LVIS_SELECTED, LVIS_SELECTED);
+        } else if total > 0 && selected_rows.len() == total {
             item_state(pane.list, usize::MAX, LVIS_SELECTED, LVIS_SELECTED);
         } else {
-            for row in selected_rows {
+            for &row in &selected_rows {
                 item_state(pane.list, row, LVIS_SELECTED, LVIS_SELECTED);
             }
         }
         if total > 0 {
-            let row = focused_row.unwrap_or(0);
-            item_state(pane.list, row, LVIS_FOCUSED, LVIS_FOCUSED);
-            if let Some(top) = top_row {
-                send(pane.list, LVM_ENSUREVISIBLE, top, 0);
+            let focus = reveal_row
+                .or(focused_row)
+                .or_else(|| selected_rows.first().copied())
+                .or(top_row)
+                .unwrap_or(0);
+            item_state(pane.list, focus, LVIS_FOCUSED, LVIS_FOCUSED);
+            if reveal_row.is_some() {
+                send(pane.list, LVM_ENSUREVISIBLE, focus, 0);
+            } else if keep_viewport {
+                let top = top_row.unwrap_or_else(|| (native_top.max(0) as usize).min(total - 1));
+                scroll_to(pane.list, top);
+            } else {
+                scroll_to(pane.list, 0);
+                send(pane.list, LVM_ENSUREVISIBLE, focus, 0);
             }
-            send(pane.list, LVM_ENSUREVISIBLE, row, 0);
         }
         self.changing_rows.set(false);
         unsafe {
@@ -650,39 +1046,27 @@ impl App {
         }
         self.status_changed();
     }
-
     fn start_transfer(&self, action: Transfer) {
-        if self.transfer_active.get() {
-            return;
-        }
         let index = self.active.get();
         let pane = &self.panes[index];
+        if self.operation_active.get() || !pane.listing.borrow().ready() {
+            return;
+        }
         let destination = {
             let target = self.panes[1 - index].listing.borrow();
-            if target.loading || target.error.is_some() {
+            if !target.complete || target.error.is_some() {
                 return;
             }
             target.path.clone()
         };
-        let (source_path, sources) = {
-            let source = pane.listing.borrow();
-            if source.loading || source.path == destination {
-                return;
-            }
-            let paths = pane
-                .selection()
-                .filter_map(|index| source.rows.get(index))
-                .map(|row| source.path.join(row.filename()))
-                .collect::<Vec<_>>();
-            (source.path.clone(), paths)
-        };
-        if sources.is_empty() {
+        let (folder, sources) = pane.selected_paths();
+        if sources.is_empty() || folder == destination {
             return;
         }
-        let count = grouped(sources.len() as u64);
         let text = format!(
-            "{} {count} selected item(s) to\n{}?",
+            "{} {} to\n{}?",
             action.verb(),
+            selection_label(sources.len()),
             destination.display()
         );
         if message(
@@ -690,64 +1074,198 @@ impl App {
             "Between panes",
             &text,
             MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2,
-        ) != IDOK
+        ) == IDOK
         {
-            self.focus_list(index);
+            let mut changes = Changes::folder(folder);
+            changes.folders.push(destination.clone());
+            self.submit(
+                Operation::Transfer {
+                    action,
+                    sources,
+                    destination,
+                },
+                changes,
+            );
+        }
+        self.focus_list(index);
+    }
+
+    fn rename(&self) {
+        let index = self.active.get();
+        let pane = &self.panes[index];
+        if self.operation_active.get() || !pane.listing.borrow().ready() || pane.count() != 1 {
             return;
         }
-        self.transfer_active.set(true);
-        *self.transfer_status.borrow_mut() = format!("{} in progress…", action.verb());
+        let Some((source, directory)) = pane
+            .selection()
+            .next()
+            .and_then(|row| pane.item(row as isize))
+        else {
+            return;
+        };
+        let Some(original) = source.file_name() else {
+            return;
+        };
+        let stem = if directory {
+            original
+        } else {
+            source.file_stem().unwrap_or(original)
+        };
+        let name = prompt::name(
+            self.window,
+            self.font.get(),
+            w!("Rename"),
+            original,
+            stem.encode_wide().count(),
+        );
         self.focus_list(index);
+        if let Some(name) = name
+            && name != original
+        {
+            let mut changes = Changes::folder(pane.listing.borrow().path.clone());
+            changes.rename = Some((wide(original), wide(&name)));
+            self.submit(Operation::Rename { source, name }, changes);
+        }
+    }
+
+    fn create_folder(&self) {
+        let index = self.active.get();
+        let pane = &self.panes[index];
+        let (folder, location, epoch) = {
+            let listing = pane.listing.borrow();
+            if self.operation_active.get() || !listing.ready() {
+                return;
+            }
+            (
+                listing.path.clone(),
+                listing.location,
+                listing.selection_epoch,
+            )
+        };
+        let name = prompt::name(
+            self.window,
+            self.font.get(),
+            w!("New folder"),
+            "New folder".as_ref(),
+            10,
+        );
+        self.focus_list(index);
+        if let Some(name) = name {
+            let mut changes = Changes::folder(folder.clone());
+            changes.reveal = Some((index, location, epoch, wide(&name)));
+            self.submit(Operation::CreateFolder(folder.join(name)), changes);
+        }
+    }
+
+    fn recycle(&self) {
+        let index = self.active.get();
+        let pane = &self.panes[index];
+        if self.operation_active.get() || !pane.listing.borrow().ready() {
+            return;
+        }
+        let (folder, sources) = pane.selected_paths();
+        if sources.is_empty() {
+            return;
+        }
+        let text = format!(
+            "Send {} to the Recycle Bin?\n\n{}",
+            selection_label(sources.len()),
+            folder.display(),
+        );
+        if message(
+            self.window,
+            "Recycle selection",
+            &text,
+            MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2,
+        ) == IDOK
+        {
+            self.submit(Operation::Recycle(sources), Changes::folder(folder));
+        }
+        self.focus_list(index);
+    }
+
+    fn submit(&self, operation: Operation, changes: Changes) {
+        self.operation_active.set(true);
+        let verb = operation.verb();
+        *self.operation_status.borrow_mut() = format!("{verb} in progress…");
         self.status_changed();
         let sender = self.sender.clone();
         let owner = self.window.0 as usize;
-        let folders = [source_path, destination];
-        let finished_folders = folders.clone();
         if let Err(error) = thread::Builder::new()
-            .name("shell-transfer".into())
+            .name("file-operation".into())
             .spawn(move || {
-                let result = shell::transfer(owner as isize, action, &sources, &folders[1]);
-                if sender
-                    .send(Event::Transfer(action, folders, result))
-                    .is_ok()
-                {
+                let result = operation.perform(owner);
+                if sender.send(Event::Operation(verb, changes, result)).is_ok() {
                     wake(owner);
                 }
             })
         {
-            self.finish_transfer(
-                action,
-                &finished_folders,
+            self.finish_operation(
+                verb,
+                Changes {
+                    folders: Vec::new(),
+                    rename: None,
+                    reveal: None,
+                },
                 Err(windows::core::Error::new(E_FAIL, error.to_string())),
             );
         }
     }
 
-    fn finish_transfer(&self, action: Transfer, folders: &[PathBuf; 2], result: Result<bool>) {
-        self.transfer_active.set(false);
-        *self.transfer_status.borrow_mut() = match result {
-            Ok(false) => format!("{} finished", action.verb()),
-            Ok(true) => format!(
-                "{} stopped · some items may have transferred",
-                action.verb()
-            ),
-            Err(error) => format!("{} failed · {}", action.verb(), error.message().trim()),
+    fn finish_operation(&self, verb: &str, changes: Changes, result: Result<bool>) {
+        self.operation_active.set(false);
+        let completed = matches!(&result, Ok(false));
+        *self.operation_status.borrow_mut() = match &result {
+            Ok(false) => format!("{verb} finished"),
+            Ok(true) => format!("{verb} stopped"),
+            Err(_) => format!("{verb} failed"),
         };
         for index in 0..2 {
-            // Supersede a scan that may have started before the transfer changed its folder.
-            if folders.contains(&self.panes[index].listing.borrow().path) {
-                self.refresh(index);
+            let mut listing = self.panes[index].listing.borrow_mut();
+            if !changes.folders.contains(&listing.path) {
+                continue;
             }
+            if completed {
+                if let Some(rename) = &changes.rename {
+                    add_renames(&mut listing.pending_renames, vec![rename.clone()]);
+                }
+                if let Some((pane, location, epoch, name)) = &changes.reveal
+                    && index == *pane
+                    && listing.location == *location
+                {
+                    listing.pending_reveal = Some((*epoch, name.clone()));
+                }
+            }
+            drop(listing);
+            self.refresh(index);
         }
         self.status_changed();
+        if let Err(error) = result {
+            message(
+                self.window,
+                &format!("{verb} failed"),
+                &error.message(),
+                MB_OK | MB_ICONWARNING,
+            );
+        }
     }
-
     fn events(&self) {
         while let Ok(event) = self.events.try_recv() {
             match event {
-                Event::Directory(update) => self.receive_directory(update),
-                Event::Transfer(action, folders, result) => {
-                    self.finish_transfer(action, &folders, result)
+                Event::Directory(Update::Directory {
+                    pane,
+                    id,
+                    preview,
+                    entries,
+                }) => self.receive_directory(pane, id, preview, entries),
+                Event::Directory(Update::View { pane, id, rows }) => {
+                    if self.panes[pane].listing.borrow().view_request == id {
+                        self.apply_rows(pane, rows);
+                    }
+                }
+                Event::Watch(index, id, notice) => self.receive_watch(index, id, notice),
+                Event::Operation(verb, changes, result) => {
+                    self.finish_operation(verb, changes, result)
                 }
             }
         }
@@ -757,7 +1275,16 @@ impl App {
         match command {
             COPY => self.start_transfer(Transfer::Copy),
             MOVE => self.start_transfer(Transfer::Move),
+            RENAME => self.rename(),
+            CREATE_FOLDER => self.create_folder(),
+            RECYCLE => self.recycle(),
             REFRESH => self.refresh(self.active.get()),
+            LEFT_CLEAR => self.clear_filter(0),
+            RIGHT_CLEAR => self.clear_filter(1),
+            SORT_NAME..=SORT_MODIFIED => {
+                let column = Column::from_index((command - SORT_NAME) as usize).unwrap();
+                self.sort_by(self.active.get(), column);
+            }
             VIEW => self.view_menu(),
             LEFT_UP => self.parent(0),
             RIGHT_UP => self.parent(1),
@@ -775,7 +1302,15 @@ impl App {
 
     fn view_menu(&self) {
         let mut button = RECT::default();
+        let sort = self.panes[self.active.get()].listing.borrow().sort;
         unsafe {
+            let _ = CheckMenuRadioItem(
+                self.menu,
+                SORT_NAME as u32,
+                SORT_MODIFIED as u32,
+                SORT_NAME as u32 + sort.column.index() as u32,
+                MF_BYCOMMAND.0,
+            );
             let _ = GetWindowRect(self.view, &mut button);
             let _ = TrackPopupMenu(
                 self.menu,
@@ -796,6 +1331,7 @@ impl App {
         let active = self.active.get();
         let pane = &self.panes[active];
         let in_edit = control == pane.path;
+        let filtering = control == pane.filter;
         let in_list = control == pane.list;
         let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
         match VIRTUAL_KEY(key) {
@@ -804,20 +1340,30 @@ impl App {
                 let _ = SetFocus(Some(pane.path));
                 send(pane.path, EM_SETSEL, 0, -1);
             },
+            VK_F if ctrl => unsafe {
+                let _ = SetFocus(Some(pane.filter));
+                send(pane.filter, EM_SETSEL, 0, -1);
+            },
             VK_R if ctrl => self.refresh(active),
+            VK_1 if ctrl => self.sort_by(active, Column::Name),
+            VK_2 if ctrl => self.sort_by(active, Column::Size),
+            VK_3 if ctrl => self.sort_by(active, Column::Modified),
             VK_A if ctrl && in_list => {
-                if !pane.listing.borrow().loading {
+                if pane.listing.borrow().ready() {
                     item_state(pane.list, usize::MAX, LVIS_SELECTED, LVIS_SELECTED);
                 }
             }
             VK_BACK if in_list => self.parent(active),
             VK_F5 => self.start_transfer(Transfer::Copy),
             VK_F6 => self.start_transfer(Transfer::Move),
+            VK_F2 if in_list => self.rename(),
+            VK_F7 => self.create_folder(),
+            VK_DELETE if in_list => self.recycle(),
             VK_RETURN if in_edit => {
                 let path = window_text(pane.path);
                 if !path.is_empty() {
                     let base = pane.listing.borrow().path.clone();
-                    self.navigate(active, base.join(Path::new(&path)), false);
+                    self.navigate(active, base.join(Path::new(&path)));
                     self.focus_list(active);
                 }
             }
@@ -825,6 +1371,8 @@ impl App {
                 show_path(pane.path, &pane.listing.borrow().path);
                 self.focus_list(active);
             }
+            VK_ESCAPE if filtering => self.clear_filter(active),
+            VK_RETURN if filtering => self.focus_list(active),
             VK_RETURN if in_list => {
                 let selected = send(
                     pane.list,
@@ -884,7 +1432,7 @@ impl App {
                 let listing = pane.listing.borrow();
                 let start = (info.iStart.max(0) as usize).min(listing.rows.len());
                 let result = (start..listing.rows.len()).chain(0..start).find(|&index| {
-                    let name = &listing.rows[index].name;
+                    let name = &listing.rows.get(index).unwrap().name;
                     name.len() > query.len()
                         && unsafe { CompareStringOrdinal(&name[..query.len()], query, true) }
                             == CSTR_EQUAL
@@ -892,16 +1440,83 @@ impl App {
                 return LRESULT(result.map_or(-1, |index| index as isize));
             }
             NM_SETFOCUS => self.active(index),
+            LVN_COLUMNCLICK => {
+                let click = unsafe { &*(data.0 as *const NMLISTVIEW) };
+                if let Some(column) = Column::from_index(click.iSubItem as usize) {
+                    self.sort_by(index, column);
+                }
+            }
             NM_DBLCLK => {
                 let info = unsafe { &*(data.0 as *const NMITEMACTIVATE) };
                 self.open_row(index, info.iItem as isize);
             }
             LVN_ITEMCHANGED | LVN_ODSTATECHANGED if !self.changing_rows.get() => {
+                let mut listing = pane.listing.borrow_mut();
+                listing.selection_epoch = listing.selection_epoch.wrapping_add(1);
+                drop(listing);
                 self.status_changed()
             }
             _ => {}
         }
         LRESULT(0)
+    }
+
+    fn save_workspace(&self) {
+        if self.persist {
+            let left = self.panes[0].listing.borrow();
+            let right = self.panes[1].listing.borrow();
+            let settings = Workspace {
+                paths: [left.path.clone(), right.path.clone()],
+                sort: [left.sort, right.sort],
+                theme: self.theme.get(),
+                split: self.split.get(),
+                persist: true,
+            };
+            let _ = settings.save();
+        }
+    }
+}
+
+fn add_renames(renames: &mut Vec<Rename>, incoming: Vec<Rename>) {
+    if renames.len() + incoming.len() > 128 {
+        renames.clear();
+    } else {
+        renames.extend(incoming);
+    }
+}
+
+fn selection_label(count: usize) -> String {
+    if count == 1 {
+        "1 selected item".to_owned()
+    } else {
+        format!("{} selected items", grouped(count as u64))
+    }
+}
+
+fn renamed<'a>(mut name: &'a [u16], pairs: &'a [Rename]) -> &'a [u16] {
+    for (previous, next) in pairs {
+        if name == previous {
+            name = next;
+        }
+    }
+    name
+}
+
+fn scroll_to(list: HWND, row: usize) {
+    let current = send(list, LVM_GETTOPINDEX, 0, 0);
+    let mut rect = RECT {
+        left: LVIR_BOUNDS as i32,
+        ..Default::default()
+    };
+    if send(
+        list,
+        LVM_GETITEMRECT,
+        current.max(0) as usize,
+        (&mut rect as *mut RECT) as isize,
+    ) != 0
+    {
+        let distance = (row as isize - current) * (rect.bottom - rect.top) as isize;
+        send(list, LVM_SCROLL, 0, distance);
     }
 }
 
@@ -993,7 +1608,7 @@ unsafe extern "system" fn control_proc(
                     && header.hwndFrom.0 as isize == send(window, LVM_GETHEADER, 0, 0)
                     && let Some(app) = app()
                 {
-                    return app.draw_header(&*(lparam.0 as *const NMCUSTOMDRAW));
+                    return app.draw_header(window, &*(lparam.0 as *const NMCUSTOMDRAW));
                 }
             }
             WM_NCDESTROY => {
@@ -1025,6 +1640,13 @@ unsafe extern "system" fn window_proc(
                     let code = (wparam.0 >> 16) as u16;
                     if code == EN_SETFOCUS as u16 && (131..=132).contains(&id) {
                         app.active((id - 131) as usize);
+                    } else if code == EN_SETFOCUS as u16
+                        && (LEFT_FILTER..=RIGHT_FILTER).contains(&id)
+                    {
+                        app.active((id - LEFT_FILTER) as usize);
+                    } else if code == EN_CHANGE as u16 && (LEFT_FILTER..=RIGHT_FILTER).contains(&id)
+                    {
+                        app.filter_changed((id - LEFT_FILTER) as usize);
                     } else if code == 0 {
                         app.command(id);
                     }
@@ -1048,6 +1670,14 @@ unsafe extern "system" fn window_proc(
                 }
                 WM_SIZE => {
                     app.layout();
+                    return LRESULT(0);
+                }
+                WM_TIMER if (SCAN_TIMER..SCAN_TIMER + 2).contains(&wparam.0) => {
+                    app.start_initial_scan(wparam.0 - SCAN_TIMER);
+                    return LRESULT(0);
+                }
+                WM_TIMER if (REFRESH_TIMER..REFRESH_TIMER + 2).contains(&wparam.0) => {
+                    app.scan_dirty_folder(wparam.0 - REFRESH_TIMER);
                     return LRESULT(0);
                 }
                 WM_THEMECHANGED | WM_SETTINGCHANGE | WM_SYSCOLORCHANGE => app.apply_theme(),
@@ -1104,7 +1734,7 @@ unsafe extern "system" fn window_proc(
                         return LRESULT(1);
                     }
                 }
-                WM_CLOSE if app.transfer_active.get() => {
+                WM_CLOSE if app.operation_active.get() => {
                     message(
                         window,
                         "File operation in progress",
@@ -1113,6 +1743,7 @@ unsafe extern "system" fn window_proc(
                     );
                     return LRESULT(0);
                 }
+                WM_CLOSE => app.save_workspace(),
                 WM_NCDESTROY => {
                     SetWindowLongPtrW(window, GWLP_USERDATA, 0);
                 }
@@ -1149,7 +1780,7 @@ mod tests {
     fn dpi_notification_resizes_the_native_controls() -> Result<()> {
         let _apartment = shell::Apartment::enter()?;
         let window = create_window()?;
-        let app = attach(window)?;
+        let app = attach(window, &Workspace::default())?;
         let target_dpi = 144;
         let size = RECT {
             left: 40,

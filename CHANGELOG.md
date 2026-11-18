@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.0] - 2026-11-18
+
+### Added
+
+- Added live folder updates with selection, scroll position, and in-progress path edits preserved.
+- Added F2 rename, F7 new folder, and Delete to recycle with a separate Windows warning when permanent deletion is required.
+- Added per-pane filename filtering and sortable Name, Size, and Modified columns, also available from the keyboard.
+- Added automatic workspace restore for both folder paths, sort, divider position, and theme, with a `--no-workspace` option for temporary sessions.
+
 ## [0.1.0] - 2026-11-18
 
 ### Added

@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 use windows::{
     Win32::{
@@ -9,10 +12,11 @@ use windows::{
             CoUninitialize,
         },
         UI::Shell::{
-            FOF_NOCONFIRMMKDIR, FileOperation, IFileOperation, IShellItem,
-            SHCreateItemFromParsingName, SHFILEINFOW, SHGFI_SMALLICON, SHGFI_SYSICONINDEX,
-            SHGFI_USEFILEATTRIBUTES, SHGSI_SYSICONINDEX, SHGetFileInfoW, SHGetStockIconInfo,
-            SHSTOCKICONINFO, SIID_DOCNOASSOC, SIID_FOLDER, ShellExecuteW,
+            FOF_NOCONFIRMMKDIR, FOF_WANTNUKEWARNING, FOFX_ADDUNDORECORD, FOFX_RECYCLEONDELETE,
+            FileOperation, IFileOperation, IShellItem, SHCreateItemFromParsingName, SHFILEINFOW,
+            SHGFI_SMALLICON, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGSI_SYSICONINDEX,
+            SHGetFileInfoW, SHGetStockIconInfo, SHSTOCKICONINFO, SIID_DOCNOASSOC, SIID_FOLDER,
+            ShellExecuteW,
         },
         UI::WindowsAndMessaging::SW_SHOWNORMAL,
     },
@@ -60,35 +64,83 @@ fn item(path: &Path) -> Result<IShellItem> {
     unsafe { SHCreateItemFromParsingName(PCWSTR(text.as_ptr()), None) }
 }
 
-pub fn transfer(
-    owner: isize,
-    action: Transfer,
-    sources: &[PathBuf],
-    destination: &Path,
-) -> Result<bool> {
-    let _apartment = Apartment::enter()?;
-    let destination = item(destination)?;
-    unsafe {
-        let operation: IFileOperation =
-            CoCreateInstance(&FileOperation, None, CLSCTX_INPROC_SERVER)?;
-        operation.SetOwnerWindow(HWND(owner as _))?;
-        operation.SetOperationFlags(FOF_NOCONFIRMMKDIR)?;
-        for source in sources {
-            let source = item(source)?;
-            match action {
-                Transfer::Copy => {
-                    operation.CopyItem(&source, &destination, PCWSTR::null(), None)?
-                }
-                Transfer::Move => {
-                    operation.MoveItem(&source, &destination, PCWSTR::null(), None)?
-                }
-            }
-        }
-        operation.PerformOperations()?;
-        Ok(operation.GetAnyOperationsAborted()?.as_bool())
-    }
+pub enum Operation {
+    Transfer {
+        action: Transfer,
+        sources: Vec<PathBuf>,
+        destination: PathBuf,
+    },
+    Rename {
+        source: PathBuf,
+        name: OsString,
+    },
+    CreateFolder(PathBuf),
+    Recycle(Vec<PathBuf>),
 }
 
+impl Operation {
+    pub fn verb(&self) -> &'static str {
+        match self {
+            Self::Transfer { action, .. } => action.verb(),
+            Self::Rename { .. } => "Rename",
+            Self::CreateFolder(_) => "New folder",
+            Self::Recycle(_) => "Recycle",
+        }
+    }
+
+    pub fn perform(&self, owner: usize) -> Result<bool> {
+        if let Self::CreateFolder(path) = self {
+            std::fs::create_dir(path).map_err(|error| {
+                windows::core::Error::new(windows::Win32::Foundation::E_FAIL, error.to_string())
+            })?;
+            return Ok(false);
+        }
+
+        let _apartment = Apartment::enter()?;
+        unsafe {
+            let operation: IFileOperation =
+                CoCreateInstance(&FileOperation, None, CLSCTX_INPROC_SERVER)?;
+            operation.SetOwnerWindow(HWND(owner as _))?;
+            match self {
+                Self::Transfer {
+                    action,
+                    sources,
+                    destination,
+                } => {
+                    let destination = item(destination)?;
+                    operation.SetOperationFlags(FOF_NOCONFIRMMKDIR)?;
+                    for source in sources {
+                        let source = item(source)?;
+                        match action {
+                            Transfer::Copy => {
+                                operation.CopyItem(&source, &destination, PCWSTR::null(), None)?
+                            }
+                            Transfer::Move => {
+                                operation.MoveItem(&source, &destination, PCWSTR::null(), None)?
+                            }
+                        }
+                    }
+                }
+                Self::Rename { source, name } => {
+                    operation.SetOperationFlags(FOFX_ADDUNDORECORD)?;
+                    let name = wide(name);
+                    operation.RenameItem(&item(source)?, PCWSTR(name.as_ptr()), None)?;
+                }
+                Self::Recycle(sources) => {
+                    operation.SetOperationFlags(
+                        FOFX_RECYCLEONDELETE | FOFX_ADDUNDORECORD | FOF_WANTNUKEWARNING,
+                    )?;
+                    for source in sources {
+                        operation.DeleteItem(&item(source)?, None)?;
+                    }
+                }
+                Self::CreateFolder(_) => unreachable!(),
+            }
+            operation.PerformOperations()?;
+            Ok(operation.GetAnyOperationsAborted()?.as_bool())
+        }
+    }
+}
 pub fn open(owner: HWND, path: &Path) -> Result<()> {
     let path = wide(path);
     let result = unsafe {
