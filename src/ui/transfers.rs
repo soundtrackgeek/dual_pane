@@ -129,6 +129,7 @@ pub(super) struct Transfers {
     selected: Cell<Option<u64>>,
     rendered: Cell<Option<u64>>,
     updating: Cell<bool>,
+    auto_close: Cell<bool>,
 }
 
 impl App {
@@ -247,6 +248,7 @@ impl App {
             .clipboard_sequence()
             .filter(|_| report.completed() == report.items.len());
         let action = job.request.action;
+        let clean = !report.failed && !report.aborted && !report.unconfirmed();
         let note = format!("{} · {}", action.verb(), {
             job.report = Some(report);
             job.status()
@@ -270,6 +272,21 @@ impl App {
         }
         self.pump_transfers();
         self.transfer_ui_changed();
+        if self.transfers.auto_close.get() {
+            if !clean {
+                self.transfers.auto_close.set(false);
+            } else if self.transfers.queue.borrow().active().is_none()
+                && self.waiting_transfers() == 0
+            {
+                let window = self.transfers.window.get();
+                if !window.0.is_null() {
+                    unsafe {
+                        let _ = DestroyWindow(window);
+                    }
+                    self.focus_list(self.active.get());
+                }
+            }
+        }
     }
 
     fn transfer_ui_changed(&self) {
@@ -422,6 +439,18 @@ const OPEN_FOLDERS: u16 = 612;
 
 impl App {
     pub fn show_transfers(&self) {
+        self.transfers.auto_close.set(false);
+        self.open_transfers_panel();
+    }
+
+    pub fn show_transfers_auto(&self) {
+        if self.transfers.window.get().0.is_null() {
+            self.transfers.auto_close.set(true);
+        }
+        self.open_transfers_panel();
+    }
+
+    fn open_transfers_panel(&self) {
         let existing = self.transfers.window.get();
         if !existing.0.is_null() {
             unsafe {
@@ -960,6 +989,7 @@ unsafe extern "system" fn panel_proc(
             WM_NCDESTROY => {
                 app.transfers.window.set(HWND::default());
                 app.transfers.rendered.set(None);
+                app.transfers.auto_close.set(false);
                 SetWindowLongPtrW(window, GWLP_USERDATA, 0);
             }
             WM_COMMAND => {

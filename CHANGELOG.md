@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.0-rc.12] - 2026-11-21
+
+### Changed
+
+- The **Transfers** panel now closes automatically once an auto-opened ZIP pack or extract job finishes cleanly (staying open if an error or cancellation occurred, or if opened manually via `Ctrl+J`).
+
 ## [1.0.0-rc.11] - 2026-11-21
 
 ### Changed
