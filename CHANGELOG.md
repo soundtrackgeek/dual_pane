@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.0-rc.13] - 2026-11-21
+
+### Added
+
+- Pressing **F3** (Quick View) on a `.zip` file now shows an instant summary of its contents (file/folder counts, total uncompressed size, and up to 500 entries) directly from the ZIP central directory without decompressing.
+
 ## [1.0.0-rc.12] - 2026-11-21
 
 ### Changed

@@ -119,6 +119,22 @@ fn read_preview(path: &Path, current: &impl Fn() -> bool) -> io::Result<Preview>
     let mut file = File::open(path)?;
     let mut bytes = Vec::new();
     read_to(&mut file, &mut bytes, TEXT_LIMIT + 1, current)?;
+    if path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+        && (bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06"))
+    {
+        drop(file);
+        return match crate::archive::summarize(path, current) {
+            Ok(content) => Ok(Preview::Text {
+                content,
+                excerpt: false,
+            }),
+            Err(error) => Ok(Preview::Details(format!(
+                "Could not read ZIP directory · {error}"
+            ))),
+        };
+    }
     if let Some(codec) = image_codec(&bytes) {
         if file.metadata()?.len() > IMAGE_LIMIT as u64 {
             return Ok(Preview::Details(

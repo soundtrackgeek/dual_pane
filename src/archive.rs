@@ -242,6 +242,62 @@ pub fn read_member(
     Ok((bytes, size))
 }
 
+const MAX_PREVIEW_ENTRIES: usize = 500;
+
+pub fn summarize(path: &Path, check: &impl Fn() -> bool) -> io::Result<String> {
+    let (archive, _) = open(path, check)?;
+    let count = archive.len();
+    let mut files = 0_usize;
+    let mut folders = 0_usize;
+    let mut uncompressed = 0_u128;
+    let mut lines = Vec::new();
+    for i in 0..count {
+        if i.is_multiple_of(1024) {
+            current(check)?;
+        }
+        let entry = archive.by_index_data(i).map_err(io::Error::other)?;
+        let Some((name, directory)) = member_path(&entry) else {
+            continue;
+        };
+        if directory {
+            folders += 1;
+            if lines.len() < MAX_PREVIEW_ENTRIES {
+                lines.push(format!("{name}/"));
+            }
+        } else {
+            files += 1;
+            let size = entry.size();
+            uncompressed += u128::from(size);
+            if lines.len() < MAX_PREVIEW_ENTRIES {
+                lines.push(format!("{name}  ({} bytes)", directory::grouped(size)));
+            }
+        }
+    }
+    let total_entries = files + folders;
+    let mut out = format!(
+        "ZIP archive · {} {} · {} {} · {} bytes uncompressed\r\n",
+        directory::grouped(files as u64),
+        if files == 1 { "file" } else { "files" },
+        directory::grouped(folders as u64),
+        if folders == 1 { "folder" } else { "folders" },
+        directory::grouped(uncompressed.min(u128::from(u64::MAX)) as u64),
+    );
+    if !lines.is_empty() {
+        out.push_str("\r\n");
+        for line in &lines {
+            out.push_str(line);
+            out.push_str("\r\n");
+        }
+        if total_entries > lines.len() {
+            out.push_str(&format!(
+                "\r\n… and {} more entries (press Enter on the ZIP to browse)\r\n",
+                directory::grouped((total_entries - lines.len()) as u64)
+            ));
+        }
+    }
+    Ok(out)
+}
+
 struct PackEntry {
     source: PathBuf,
     archive_name: String,
@@ -796,6 +852,11 @@ mod tests {
         let (head, total) = read_member(&archive, "nested/data.txt", 6, &|| true)?;
         assert_eq!(head, b"012345");
         assert_eq!(total, 16);
+
+        let summary = summarize(&archive, &|| true)?;
+        assert!(summary.contains("2 files"));
+        assert!(summary.contains("hello.txt"));
+        assert!(summary.contains("nested/data.txt"));
 
         let existing = Packer::prepare(&source, &dest, OsStr::new("bundle.zip"), &names, || true);
         assert!(matches!(existing, Err(error) if error.kind() == io::ErrorKind::AlreadyExists));
