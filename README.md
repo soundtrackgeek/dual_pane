@@ -57,6 +57,7 @@ Click a drive button above a pane’s path field to open that drive’s root in 
 | Ctrl+F | Focus the active pane's filename filter |
 | Alt+F7 | Find files in subfolders |
 | Ctrl+1 / Ctrl+2 / Ctrl+3 | Sort by Name / Size / Modified. Repeat to reverse direction |
+| Ctrl+H | Show or hide hidden and system files |
 | Ctrl+Shift+C | Compare the folders in the two active tabs |
 | Ctrl+J | Open the Transfers panel |
 | Ctrl+P | Open the folder-pair picker |
@@ -79,7 +80,7 @@ Each tab remembers its folder, sort, filter, scroll position, and focused item. 
 
 Use **Pairs…** to preview the left and right paths for a saved pair. Opening a pair navigates the two active tabs and leaves the other tabs available. The picker also lets you save or remove a pair.
 
-The lists start in folders-first natural name order. Click **Name**, **Size**, or **Modified** to sort and click the same column again to reverse the order. The filter matches any part of a filename and ignores case. New folder visits start with a clear filter. Back and Forward return to the filter for that visit. The pane footer shows the filtered count and the selected count. Rows hidden by a filter leave the selection.
+The lists start in folders-first natural name order and show Windows file-type icons cached by extension. Hidden and system items are hidden by default and counted in the pane footer; press **Ctrl+H** or choose **View → Show hidden items** to show them in muted text (persisted with your workspace). Click **Name**, **Size**, or **Modified** to sort and click the same column again to reverse the order. The filter matches any part of a filename and ignores case. New folder visits start with a clear filter. Back and Forward return to the filter for that visit. The pane footer shows the filtered count and the selected count. Rows hidden by a filter leave the selection.
 
 Both local and UNC paths work for browsing. Filehelm watches each open folder for changes and preserves the selected items and viewport when possible. An unsupported or disconnected watch leaves **Ctrl+R** available for a manual refresh. If Windows cannot recycle the selection, it presents a separate warning before a permanent deletion.
 

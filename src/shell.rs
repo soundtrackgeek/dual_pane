@@ -1,4 +1,6 @@
 use std::{
+    cell::RefCell,
+    collections::HashMap,
     ffi::OsString,
     path::{Path, PathBuf},
 };
@@ -228,10 +230,13 @@ fn shell_execute_result(code: isize, fallback: &str) -> Result<()> {
     }
 }
 
+const MAX_CACHED_EXTENSIONS: usize = 1024;
+
 pub struct Icons {
     pub list: usize,
     pub folder: i32,
     pub file: i32,
+    extensions: RefCell<HashMap<Box<[u16]>, i32>>,
 }
 
 impl Icons {
@@ -262,6 +267,83 @@ impl Icons {
             list,
             folder: folder.iSysImageIndex,
             file: document.iSysImageIndex,
+            extensions: RefCell::new(HashMap::new()),
         })
+    }
+
+    pub fn for_entry(&self, name: &[u16], directory: bool) -> i32 {
+        if directory {
+            return self.folder;
+        }
+        let Some(extension) = extension_key(name) else {
+            return self.file;
+        };
+        if let Some(&icon) = self.extensions.borrow().get(extension.as_slice()) {
+            return icon;
+        }
+        let mut probe = Vec::with_capacity(extension.len() + 3);
+        probe.push(u16::from(b'f'));
+        probe.push(u16::from(b'.'));
+        probe.extend_from_slice(&extension);
+        probe.push(0);
+        let mut info = SHFILEINFOW::default();
+        let icon = if unsafe {
+            SHGetFileInfoW(
+                PCWSTR(probe.as_ptr()),
+                FILE_ATTRIBUTE_NORMAL,
+                Some(&mut info),
+                size_of::<SHFILEINFOW>() as u32,
+                SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES,
+            )
+        } != 0
+        {
+            info.iIcon
+        } else {
+            self.file
+        };
+        let mut cache = self.extensions.borrow_mut();
+        if cache.len() < MAX_CACHED_EXTENSIONS {
+            cache.insert(extension.into_boxed_slice(), icon);
+        }
+        icon
+    }
+}
+
+fn extension_key(name: &[u16]) -> Option<Vec<u16>> {
+    let bare = name.strip_suffix(&[0]).unwrap_or(name);
+    let dot = bare.iter().rposition(|&unit| unit == u16::from(b'.'))?;
+    if dot == 0 || dot + 1 >= bare.len() {
+        return None;
+    }
+    let ext = &bare[dot + 1..];
+    if ext.len() > 32 {
+        return None;
+    }
+    Some(
+        ext.iter()
+            .map(|&unit| {
+                if (u16::from(b'A')..=u16::from(b'Z')).contains(&unit) {
+                    unit + 32
+                } else {
+                    unit
+                }
+            })
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_normalized_lowercase_extension_keys() {
+        let key =
+            |text: &str| extension_key(&wide(text)).map(|units| String::from_utf16_lossy(&units));
+        assert_eq!(key("photo.JPG").as_deref(), Some("jpg"));
+        assert_eq!(key("archive.tar.GZ").as_deref(), Some("gz"));
+        assert_eq!(key(".gitignore"), None);
+        assert_eq!(key("Makefile"), None);
+        assert_eq!(key("trailing."), None);
     }
 }

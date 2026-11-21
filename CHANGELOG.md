@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.9] - 2026-11-21
+
+### Added
+
+- Added extension-aware Windows file-type icons cached per lowercase extension with zero per-row disk I/O.
+- Added a **Show hidden items** toggle (`Ctrl+H` and **View → Show hidden items**), persisted in workspace settings, with muted text styling for hidden/system rows and a hidden-item count in the pane footer when hidden.
+
 ## [1.0.0-rc.8] - 2026-11-21
 
 ### Changed

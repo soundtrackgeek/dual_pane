@@ -10,6 +10,7 @@ pub struct Workspace {
     pub pairs: Vec<SavedPair>,
     pub split: f32,
     pub theme: Theme,
+    pub show_hidden: bool,
     pub persist: bool,
 }
 
@@ -24,6 +25,7 @@ impl Default for Workspace {
             pairs: Vec::new(),
             split: 0.5,
             theme: Theme::System,
+            show_hidden: false,
             persist: true,
         }
     }
@@ -121,7 +123,7 @@ impl Workspace {
             Theme::Light => "light",
             Theme::Dark => "dark",
         };
-        let mut data = wide("v3");
+        let mut data = wide("v4");
         data.extend(wide(theme));
         data.extend(wide(self.split.to_string()));
         // REG_MULTI_SZ uses an empty string as its terminator. Prefix each
@@ -155,6 +157,7 @@ impl Workspace {
                 write(&units(folder));
             }
         }
+        write(&digits(usize::from(self.show_hidden)));
         data.push(0);
         data
     }
@@ -175,7 +178,7 @@ impl Workspace {
         if !split.is_finite() {
             return None;
         }
-        let (panes, pairs) = match version.as_str() {
+        let (panes, pairs, show_hidden) = match version.as_str() {
             "v1" => {
                 let left = decode_sort(parts.next()?)?;
                 let right = decode_sort(parts.next()?)?;
@@ -185,11 +188,12 @@ impl Workspace {
                         Tabs::single(folder(parts.next()?)?, right),
                     ],
                     Vec::new(),
+                    false,
                 )
             }
-            "v2" | "v3" => {
+            "v2" | "v3" | "v4" => {
                 let mut read = || parts.next()?.strip_prefix(&[b'+' as u16]);
-                let archive = version == "v3";
+                let archive = version != "v2";
                 let panes = [
                     decode_tabs(&mut read, archive)?,
                     decode_tabs(&mut read, archive)?,
@@ -209,7 +213,16 @@ impl Workspace {
                         paths: [folder(read()?)?, folder(read()?)?],
                     });
                 }
-                (panes, pairs)
+                let show_hidden = if version == "v4" {
+                    match number(read()?)? {
+                        0 => false,
+                        1 => true,
+                        _ => return None,
+                    }
+                } else {
+                    false
+                };
+                (panes, pairs, show_hidden)
             }
             _ => return None,
         };
@@ -218,6 +231,7 @@ impl Workspace {
             pairs,
             split: split.clamp(0.30, 0.70),
             theme,
+            show_hidden,
             persist: true,
         })
     }
@@ -390,8 +404,10 @@ mod tests {
             name: OsString::from("Å → 日本語"),
             paths: [folder, PathBuf::from(r"C:\日本語")],
         });
+        workspace.show_hidden = true;
         let data = workspace.encode();
         let saved = Workspace::decode(&data).unwrap();
+        assert!(saved.show_hidden);
         assert_eq!(saved.panes[0].items.len(), 2);
         assert_eq!(saved.panes[0].active, 1);
         assert_eq!(

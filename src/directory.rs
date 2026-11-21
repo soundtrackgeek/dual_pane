@@ -14,8 +14,9 @@ use windows::{
         Foundation::{ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES, FILETIME, HANDLE, SYSTEMTIME},
         Globalization::{FIND_FROMSTART, FindStringOrdinal},
         Storage::FileSystem::{
-            FILE_ATTRIBUTE_DIRECTORY, FIND_FIRST_EX_LARGE_FETCH, FindClose, FindExInfoBasic,
-            FindExSearchNameMatch, FindFirstFileExW, FindNextFileW, WIN32_FIND_DATAW,
+            FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_SYSTEM,
+            FIND_FIRST_EX_LARGE_FETCH, FindClose, FindExInfoBasic, FindExSearchNameMatch,
+            FindFirstFileExW, FindNextFileW, WIN32_FIND_DATAW,
         },
         System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTimeEx},
         UI::Shell::StrCmpLogicalW,
@@ -43,6 +44,10 @@ pub struct Entry {
 impl Entry {
     pub fn filename(&self) -> OsString {
         OsString::from_wide(&self.name[..self.name.len() - 1])
+    }
+
+    pub fn is_hidden(&self) -> bool {
+        self.attributes & (FILE_ATTRIBUTE_HIDDEN.0 | FILE_ATTRIBUTE_SYSTEM.0) != 0
     }
 
     pub(crate) fn write_time(&self) -> u64 {
@@ -196,18 +201,22 @@ fn project(
     entries: Arc<Vec<Entry>>,
     sort: Sort,
     query: &[u16],
+    show_hidden: bool,
     current: impl Fn() -> bool,
 ) -> Option<Rows> {
     if !current() {
         return None;
     }
-    if sort == Sort::default() && query.is_empty() {
+    if sort == Sort::default() && query.is_empty() && show_hidden {
         return Some(Rows::all(entries));
     }
     let mut order = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
         if index.is_multiple_of(1024) && !current() {
             return None;
+        }
+        if !show_hidden && entry.is_hidden() {
+            continue;
         }
         if query.is_empty()
             || unsafe {
@@ -260,6 +269,7 @@ struct Projection {
     entries: Arc<Vec<Entry>>,
     sort: Sort,
     query: Vec<u16>,
+    show_hidden: bool,
 }
 
 enum Job {
@@ -401,9 +411,13 @@ impl Scanner {
                             Job::Projection(request) => {
                                 let current =
                                     || queue.view_id.load(Ordering::Relaxed) == request.id;
-                                if let Some(rows) =
-                                    project(request.entries, request.sort, &request.query, current)
-                                {
+                                if let Some(rows) = project(
+                                    request.entries,
+                                    request.sort,
+                                    &request.query,
+                                    request.show_hidden,
+                                    current,
+                                ) {
                                     deliver(Update::View {
                                         pane,
                                         id: request.id,
@@ -456,7 +470,14 @@ impl Scanner {
         }
     }
 
-    pub fn project(&self, id: usize, entries: Arc<Vec<Entry>>, sort: Sort, query: Vec<u16>) {
+    pub fn project(
+        &self,
+        id: usize,
+        entries: Arc<Vec<Entry>>,
+        sort: Sort,
+        query: Vec<u16>,
+        show_hidden: bool,
+    ) {
         let mut pending = self.0.pending.lock().unwrap();
         self.0.view_id.store(id, Ordering::Relaxed);
         pending.view = Some(Projection {
@@ -464,6 +485,7 @@ impl Scanner {
             entries,
             sort,
             query,
+            show_hidden,
         });
         self.0.ready.notify_one();
     }
@@ -668,7 +690,16 @@ mod tests {
         let names = |rows: Rows| rows.iter().map(Entry::filename).collect::<Vec<_>>();
         let sort = |column, descending| Sort { column, descending };
         assert_eq!(
-            names(project(entries.clone(), sort(Column::Size, false), &query, || true).unwrap()),
+            names(
+                project(
+                    entries.clone(),
+                    sort(Column::Size, false),
+                    &query,
+                    true,
+                    || true
+                )
+                .unwrap()
+            ),
             ["Tape Folder", "tape 3.txt", "TAPE 1.txt"],
         );
         assert_eq!(
@@ -677,16 +708,37 @@ mod tests {
                     entries.clone(),
                     sort(Column::Modified, true),
                     &query,
+                    true,
                     || true
                 )
                 .unwrap()
             ),
             ["Tape Folder", "TAPE 1.txt", "tape 3.txt"],
         );
-        assert!(project(entries.clone(), Sort::default(), &query, || false).is_none());
-        let all = project(entries.clone(), Sort::default(), &[], || true).unwrap();
+        assert!(project(entries.clone(), Sort::default(), &query, true, || false).is_none());
+        let all = project(entries.clone(), Sort::default(), &[], true, || true).unwrap();
         assert!(Arc::ptr_eq(&entries, &all.entries));
         assert!(all.order.is_none());
+
+        let mixed = Arc::new(vec![
+            Entry {
+                attributes: FILE_ATTRIBUTE_HIDDEN.0,
+                ..entry(".env", false, 1, 0)
+            },
+            Entry {
+                attributes: FILE_ATTRIBUTE_SYSTEM.0,
+                ..entry("desktop.ini", false, 1, 0)
+            },
+            entry("readme.md", false, 1, 0),
+        ]);
+        assert_eq!(
+            names(project(mixed.clone(), Sort::default(), &[], false, || true).unwrap()),
+            ["readme.md"],
+        );
+        assert_eq!(
+            names(project(mixed, Sort::default(), &[], true, || true).unwrap()),
+            [".env", "desktop.ini", "readme.md"],
+        );
     }
 
     #[test]

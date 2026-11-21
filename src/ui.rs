@@ -85,6 +85,7 @@ const CLIP_CUT: u16 = 119;
 const CLIP_COPY: u16 = 120;
 const CLIP_PASTE: u16 = 127;
 const OP_HISTORY: u16 = 128;
+const SHOW_HIDDEN: u16 = 129;
 const LEFT_UP: u16 = 121;
 const RIGHT_UP: u16 = 122;
 const LEFT_CLEAR: u16 = 125;
@@ -250,6 +251,7 @@ struct App {
     dpi: Cell<u32>,
     font: Cell<HFONT>,
     theme: Cell<Theme>,
+    show_hidden: Cell<bool>,
     palette: RefCell<paint::Palette>,
     layout: Cell<Layout>,
     split: Cell<f32>,
@@ -723,6 +725,8 @@ impl App {
             menu_label(menu, SORT_SIZE, w!("Sort by si&ze\tCtrl+2"))?;
             menu_label(menu, SORT_MODIFIED, w!("Sort by &modified\tCtrl+3"))?;
             AppendMenuW(menu, MF_SEPARATOR, 0, None)?;
+            menu_label(menu, SHOW_HIDDEN, w!("Show &hidden items\tCtrl+H"))?;
+            AppendMenuW(menu, MF_SEPARATOR, 0, None)?;
             menu_label(menu, SYSTEM, w!("&System theme"))?;
             menu_label(menu, LIGHT, w!("&Light theme"))?;
             menu_label(menu, DARK, w!("&Dark theme"))?;
@@ -757,6 +761,7 @@ impl App {
             dpi: Cell::new(unsafe { GetDpiForWindow(window) }.max(96)),
             font: Cell::new(HFONT::default()),
             theme: Cell::new(workspace.theme),
+            show_hidden: Cell::new(workspace.show_hidden),
             palette: RefCell::new(paint::Palette::new(workspace.theme)),
             layout: Cell::new(Layout::default()),
             split: Cell::new(workspace.split),
@@ -1229,16 +1234,26 @@ impl App {
         let entries = listing.entries.clone();
         let sort = listing.sort;
         let query = listing.query.clone();
-        listing.projecting = !entries.is_empty() && (sort != Sort::default() || !query.is_empty());
+        let show_hidden = self.show_hidden.get() || listing.archive.is_some();
+        listing.projecting =
+            !entries.is_empty() && (sort != Sort::default() || !query.is_empty() || !show_hidden);
         listing.keep_viewport = keep_viewport;
         let projecting = listing.projecting;
         drop(listing);
         if projecting {
-            pane.scanner.project(id, entries, sort, query);
+            pane.scanner.project(id, entries, sort, query, show_hidden);
             self.status_changed();
         } else {
             pane.scanner.cancel_view(id);
             self.apply_rows(index, Rows::all(entries));
+        }
+    }
+
+    fn toggle_hidden(&self) {
+        let show = !self.show_hidden.get();
+        self.show_hidden.set(show);
+        for index in 0..2 {
+            self.request_view(index, true);
         }
     }
 
@@ -1707,6 +1722,7 @@ impl App {
                 let column = Column::from_index((command - SORT_NAME) as usize).unwrap();
                 self.sort_by(self.active.get(), column);
             }
+            SHOW_HIDDEN => self.toggle_hidden(),
             VIEW => self.view_menu(),
             LEFT_UP => self.parent(0),
             RIGHT_UP => self.parent(1),
@@ -1740,6 +1756,16 @@ impl App {
             enable(context_menu::OPEN_TERMINAL, disk_ready);
             enable(context_menu::OPEN_EXPLORER, disk_ready);
             enable(context_menu::PROPERTIES, disk_ready && selected <= 1);
+            let hidden_flag = if self.show_hidden.get() {
+                MF_CHECKED
+            } else {
+                MF_UNCHECKED
+            };
+            let _ = CheckMenuItem(
+                self.menu,
+                u32::from(SHOW_HIDDEN),
+                (MF_BYCOMMAND | hidden_flag).0,
+            );
             let _ = CheckMenuRadioItem(
                 self.menu,
                 SORT_NAME as u32,
@@ -1794,6 +1820,7 @@ impl App {
                 send(pane.filter, EM_SETSEL, 0, -1);
             },
             VK_R if ctrl => self.command(REFRESH),
+            VK_H if ctrl && !shift => self.toggle_hidden(),
             VK_D if ctrl && !shift => self.drive_menu(active),
             VK_1 if ctrl => self.sort_by(active, Column::Name),
             VK_2 if ctrl => self.sort_by(active, Column::Size),
@@ -1877,13 +1904,10 @@ impl App {
                         }
                     }
                     if item.mask.contains(LVIF_IMAGE) {
-                        item.iImage = self.icons.as_ref().map_or(-1, |icons| {
-                            if entry.directory {
-                                icons.folder
-                            } else {
-                                icons.file
-                            }
-                        });
+                        item.iImage = self
+                            .icons
+                            .as_ref()
+                            .map_or(-1, |icons| icons.for_entry(&entry.name, entry.directory));
                     }
                     if item.mask.contains(LVIF_TEXT) {
                         if item.iSubItem == 0 {
@@ -1911,6 +1935,27 @@ impl App {
                             == CSTR_EQUAL
                 });
                 return LRESULT(result.map_or(-1, |index| index as isize));
+            }
+            NM_CUSTOMDRAW => {
+                let draw = unsafe { &mut *(data.0 as *mut NMLVCUSTOMDRAW) };
+                return match draw.nmcd.dwDrawStage {
+                    CDDS_PREPAINT => LRESULT(CDRF_NOTIFYITEMDRAW as isize),
+                    CDDS_ITEMPREPAINT => {
+                        let palette = self.palette.borrow();
+                        if !palette.contrast
+                            && pane
+                                .listing
+                                .borrow()
+                                .rows
+                                .get(draw.nmcd.dwItemSpec)
+                                .is_some_and(Entry::is_hidden)
+                        {
+                            draw.clrText = palette.muted;
+                        }
+                        LRESULT(CDRF_DODEFAULT as isize)
+                    }
+                    _ => LRESULT(CDRF_DODEFAULT as isize),
+                };
             }
             NM_SETFOCUS => self.active(index),
             LVN_BEGINDRAG => self.start_file_drag(index),
@@ -1949,6 +1994,7 @@ impl App {
                 }),
                 pairs: self.saved_pairs.borrow().clone(),
                 theme: self.theme.get(),
+                show_hidden: self.show_hidden.get(),
                 split: self.split.get(),
                 persist: true,
             };

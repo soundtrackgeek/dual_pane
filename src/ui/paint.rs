@@ -7,13 +7,13 @@ const fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
 
 pub struct Palette {
     pub dark: bool,
-    contrast: bool,
+    pub contrast: bool,
     canvas: COLORREF,
     pub surface: COLORREF,
     strip: COLORREF,
     edge: COLORREF,
     pub text: COLORREF,
-    muted: COLORREF,
+    pub muted: COLORREF,
     accent: COLORREF,
     active_strip: COLORREF,
     pub surface_brush: HBRUSH,
@@ -546,6 +546,9 @@ impl App {
                 } else {
                     format!("{count} of {} items", grouped(total as u64))
                 };
+                if !in_zip && listing.query.is_empty() && !self.show_hidden.get() && shown < total {
+                    status.push_str(&format!(" · {} hidden", grouped((total - shown) as u64)));
+                }
                 if selected != 0 {
                     status.push_str(&format!(" · {} selected", grouped(selected as u64)));
                 }
