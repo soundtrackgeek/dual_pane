@@ -1,6 +1,6 @@
 use super::*;
 
-use navigation::{MAX_PAIRS, MAX_TABS, SavedPair, Tab};
+use navigation::{Bookmark, MAX_BOOKMARKS, MAX_PAIRS, MAX_TABS, SavedPair, Tab};
 
 const KEY: PCWSTR = w!("Software\\DualPane");
 const VALUE: PCWSTR = w!("Workspace");
@@ -8,6 +8,7 @@ const VALUE: PCWSTR = w!("Workspace");
 pub struct Workspace {
     pub panes: [Tabs; 2],
     pub pairs: Vec<SavedPair>,
+    pub bookmarks: Vec<Bookmark>,
     pub split: f32,
     pub theme: Theme,
     pub show_hidden: bool,
@@ -23,6 +24,7 @@ impl Default for Workspace {
         Self {
             panes: [home, current].map(|path| Tabs::single(path, Sort::default())),
             pairs: Vec::new(),
+            bookmarks: Vec::new(),
             split: 0.5,
             theme: Theme::System,
             show_hidden: false,
@@ -123,7 +125,7 @@ impl Workspace {
             Theme::Light => "light",
             Theme::Dark => "dark",
         };
-        let mut data = wide("v4");
+        let mut data = wide("v5");
         data.extend(wide(theme));
         data.extend(wide(self.split.to_string()));
         // REG_MULTI_SZ uses an empty string as its terminator. Prefix each
@@ -158,6 +160,11 @@ impl Workspace {
             }
         }
         write(&digits(usize::from(self.show_hidden)));
+        write(&digits(self.bookmarks.len()));
+        for bookmark in &self.bookmarks {
+            write(&units(&bookmark.name));
+            write(&units(&bookmark.path));
+        }
         data.push(0);
         data
     }
@@ -178,7 +185,7 @@ impl Workspace {
         if !split.is_finite() {
             return None;
         }
-        let (panes, pairs, show_hidden) = match version.as_str() {
+        let (panes, pairs, bookmarks, show_hidden) = match version.as_str() {
             "v1" => {
                 let left = decode_sort(parts.next()?)?;
                 let right = decode_sort(parts.next()?)?;
@@ -188,10 +195,11 @@ impl Workspace {
                         Tabs::single(folder(parts.next()?)?, right),
                     ],
                     Vec::new(),
+                    Vec::new(),
                     false,
                 )
             }
-            "v2" | "v3" | "v4" => {
+            "v2" | "v3" | "v4" | "v5" => {
                 let mut read = || parts.next()?.strip_prefix(&[b'+' as u16]);
                 let archive = version != "v2";
                 let panes = [
@@ -213,7 +221,7 @@ impl Workspace {
                         paths: [folder(read()?)?, folder(read()?)?],
                     });
                 }
-                let show_hidden = if version == "v4" {
+                let show_hidden = if matches!(version.as_str(), "v4" | "v5") {
                     match number(read()?)? {
                         0 => false,
                         1 => true,
@@ -222,13 +230,34 @@ impl Workspace {
                 } else {
                     false
                 };
-                (panes, pairs, show_hidden)
+                let bookmarks = if version == "v5" {
+                    let count = number(read()?)?;
+                    if count > MAX_BOOKMARKS {
+                        return None;
+                    }
+                    let mut bookmarks = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        let name = read()?;
+                        if name.is_empty() || name.len() > 255 {
+                            return None;
+                        }
+                        bookmarks.push(Bookmark {
+                            name: OsString::from_wide(name),
+                            path: folder(read()?)?,
+                        });
+                    }
+                    bookmarks
+                } else {
+                    Vec::new()
+                };
+                (panes, pairs, bookmarks, show_hidden)
             }
             _ => return None,
         };
         Some(Self {
             panes,
             pairs,
+            bookmarks,
             split: split.clamp(0.30, 0.70),
             theme,
             show_hidden,
@@ -402,7 +431,11 @@ mod tests {
         tab.location.anchors.top_index = 8;
         workspace.pairs.push(SavedPair {
             name: OsString::from("Å → 日本語"),
-            paths: [folder, PathBuf::from(r"C:\日本語")],
+            paths: [folder.clone(), PathBuf::from(r"C:\日本語")],
+        });
+        workspace.bookmarks.push(Bookmark {
+            name: OsString::from("Work Å"),
+            path: folder,
         });
         workspace.show_hidden = true;
         let data = workspace.encode();
@@ -423,5 +456,8 @@ mod tests {
         assert!(saved.panes[0].items[0].location.query.is_empty());
         assert_eq!(saved.pairs[0].name, "Å → 日本語");
         assert_eq!(saved.pairs[0].paths, workspace.pairs[0].paths);
+        assert_eq!(saved.bookmarks.len(), 1);
+        assert_eq!(saved.bookmarks[0].name, "Work Å");
+        assert_eq!(saved.bookmarks[0].path, workspace.bookmarks[0].path);
     }
 }

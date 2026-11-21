@@ -35,7 +35,7 @@ impl Query {
         Self { pattern, wildcard }
     }
 
-    fn matches(&self, name: &[u16]) -> bool {
+    pub fn matches(&self, name: &[u16]) -> bool {
         if self.wildcard {
             glob(&self.pattern, name)
         } else {

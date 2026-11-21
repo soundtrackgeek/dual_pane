@@ -47,6 +47,7 @@ use crate::{
 
 mod archives;
 mod batch_rename;
+mod bookmarks;
 mod comparison;
 mod context_menu;
 mod drives;
@@ -62,7 +63,7 @@ mod transfers;
 mod undo_history;
 mod workspace;
 
-use navigation::{Anchors, Location, SavedPair, Tabs};
+use navigation::{Anchors, Bookmark, Location, SavedPair, Tabs};
 use workspace::Workspace;
 
 const WAKE: u32 = WM_APP + 1;
@@ -93,6 +94,12 @@ const SHOW_HIDDEN: u16 = 129;
 const PACK_ZIP: u16 = 130;
 const CALC_FOLDER_SIZES: u16 = 135;
 const CALC_SELECTED_FOLDER_SIZES: u16 = 136;
+const BOOKMARKS: u16 = 230;
+const SWAP_PANES: u16 = 231;
+const MIRROR_PANE: u16 = 232;
+const SELECT_PATTERN: u16 = 233;
+const DESELECT_PATTERN: u16 = 234;
+const INVERT_SELECTION: u16 = 235;
 const LEFT_UP: u16 = 121;
 const RIGHT_UP: u16 = 122;
 const LEFT_CLEAR: u16 = 125;
@@ -258,6 +265,8 @@ struct App {
     undo_store: Arc<crate::undo::Store>,
     undo_history: undo_history::History,
     saved_pairs: RefCell<Vec<SavedPair>>,
+    saved_bookmarks: RefCell<Vec<Bookmark>>,
+    last_select_pattern: RefCell<OsString>,
     menu: HMENU,
     file_menu_brush: Cell<HBRUSH>,
     accessibility: Option<IAccPropServices>,
@@ -721,12 +730,19 @@ impl App {
             menu_label(menu, PACK_ZIP, w!("Pack to &ZIP…\tAlt+F5"))?;
             menu_label(menu, BATCH_RENAME, w!("&Batch Rename…\tCtrl+M"))?;
             menu_label(menu, COMPARE, w!("Compare &folders…\tCtrl+Shift+C"))?;
+            menu_label(menu, BOOKMARKS, w!("&Bookmarks…\tCtrl+B"))?;
+            menu_label(menu, SWAP_PANES, w!("S&wap panes\tCtrl+U"))?;
+            menu_label(menu, MIRROR_PANE, w!("&Mirror to opposite pane\tCtrl+="))?;
             menu_label(menu, TRANSFERS, w!("&Transfers\tCtrl+J"))?;
             menu_label(menu, OP_HISTORY, w!("Operation &History…\tCtrl+Z"))?;
             AppendMenuW(menu, MF_SEPARATOR, 0, None)?;
             menu_label(menu, CLIP_CUT, w!("Cu&t files\tCtrl+X"))?;
             menu_label(menu, CLIP_COPY, w!("Cop&y files\tCtrl+C"))?;
             menu_label(menu, CLIP_PASTE, w!("&Paste files\tCtrl+V"))?;
+            AppendMenuW(menu, MF_SEPARATOR, 0, None)?;
+            menu_label(menu, SELECT_PATTERN, w!("Select by pa&ttern…\tNum +"))?;
+            menu_label(menu, DESELECT_PATTERN, w!("&Deselect by pattern…\tNum -"))?;
+            menu_label(menu, INVERT_SELECTION, w!("&Invert selection\tNum *"))?;
             AppendMenuW(menu, MF_SEPARATOR, 0, None)?;
             menu_label(
                 menu,
@@ -782,6 +798,8 @@ impl App {
             undo_store: Arc::new(crate::undo::Store::new(workspace.persist)),
             undo_history: Default::default(),
             saved_pairs: RefCell::new(workspace.pairs.clone()),
+            saved_bookmarks: RefCell::new(workspace.bookmarks.clone()),
+            last_select_pattern: RefCell::new(OsString::new()),
             menu,
             file_menu_brush: Cell::default(),
             accessibility,
@@ -1936,6 +1954,12 @@ impl App {
             LEFT_FORWARD => self.history(0, true),
             RIGHT_FORWARD => self.history(1, true),
             PAIRS => self.pick_folder_pair(),
+            BOOKMARKS => self.pick_bookmark(),
+            SWAP_PANES => self.swap_panes(),
+            MIRROR_PANE => self.mirror_pane(),
+            SELECT_PATTERN => self.select_by_pattern(true),
+            DESELECT_PATTERN => self.select_by_pattern(false),
+            INVERT_SELECTION => self.invert_selection(),
             SORT_NAME..=SORT_MODIFIED => {
                 let column = Column::from_index((command - SORT_NAME) as usize).unwrap();
                 self.sort_by(self.active.get(), column);
@@ -1981,6 +2005,9 @@ impl App {
                 disk_ready && selected > 0 && self.can_queue_transfer(),
             );
             enable(CALC_FOLDER_SIZES, disk_ready);
+            enable(SELECT_PATTERN, ready);
+            enable(DESELECT_PATTERN, ready && selected > 0);
+            enable(INVERT_SELECTION, ready);
             let hidden_flag = if self.show_hidden.get() {
                 MF_CHECKED
             } else {
@@ -2029,6 +2056,13 @@ impl App {
             VK_W if ctrl => self.close_tab(active),
             VK_P if ctrl && shift => self.save_pair(),
             VK_P if ctrl => self.pick_folder_pair(),
+            VK_B if ctrl && !shift => self.pick_bookmark(),
+            VK_U if ctrl && !shift => self.swap_panes(),
+            VK_OEM_PLUS if ctrl && !shift => self.mirror_pane(),
+            VK_I if ctrl && shift && in_list => self.invert_selection(),
+            VK_ADD if in_list && !ctrl && !shift => self.select_by_pattern(true),
+            VK_SUBTRACT if in_list && !ctrl && !shift => self.select_by_pattern(false),
+            VK_MULTIPLY if in_list && !ctrl && !shift => self.invert_selection(),
             VK_C if ctrl && shift => self.compare_folders(),
             VK_C if ctrl && in_list => self.publish_files(false),
             VK_X if ctrl && in_list && !shift => self.publish_files(true),
@@ -2222,6 +2256,94 @@ impl App {
         LRESULT(0)
     }
 
+    fn select_by_pattern(&self, select: bool) {
+        let active = self.active.get();
+        let pane = &self.panes[active];
+        if !pane.listing.borrow().ready() {
+            return;
+        }
+        let initial = self.last_select_pattern.borrow().clone();
+        let title = if select {
+            w!("Select by pattern")
+        } else {
+            w!("Deselect by pattern")
+        };
+        let entered = prompt::pattern(self.window, self.font.get(), title, &initial);
+        self.focus_list(active);
+        let Some(entered) = entered else {
+            return;
+        };
+        *self.last_select_pattern.borrow_mut() = entered.clone();
+        let units: Vec<u16> = entered.encode_wide().collect();
+        let query = crate::find::Query::new(units);
+        let state = if select {
+            LVIS_SELECTED
+        } else {
+            LIST_VIEW_ITEM_STATE_FLAGS(0)
+        };
+        let matched = {
+            let listing = pane.listing.borrow();
+            let mut count = 0_usize;
+            self.changing_rows.set(true);
+            for (row, entry) in listing.rows.iter().enumerate() {
+                if query.matches(&entry.name[..entry.name.len() - 1]) {
+                    item_state(pane.list, row, state, LVIS_SELECTED);
+                    count += 1;
+                }
+            }
+            self.changing_rows.set(false);
+            count
+        };
+        {
+            let mut listing = pane.listing.borrow_mut();
+            listing.selection_epoch = listing.selection_epoch.wrapping_add(1);
+            listing.restore = None;
+        }
+        self.refresh_selection_summary(active);
+        let pattern_text = entered.to_string_lossy();
+        *self.operation_status.borrow_mut() = if matched == 0 {
+            format!("No items matched “{pattern_text}”")
+        } else {
+            let verb = if select { "Selected" } else { "Deselected" };
+            let noun = if matched == 1 { "item" } else { "items" };
+            format!(
+                "{verb} {} {noun} matching “{pattern_text}”",
+                grouped(matched as u64)
+            )
+        };
+        self.status_changed();
+    }
+
+    fn invert_selection(&self) {
+        let active = self.active.get();
+        let pane = &self.panes[active];
+        let total = {
+            let listing = pane.listing.borrow();
+            if !listing.ready() {
+                return;
+            }
+            listing.rows.len()
+        };
+        self.changing_rows.set(true);
+        for row in 0..total {
+            let selected = send(pane.list, LVM_GETITEMSTATE, row, LVIS_SELECTED.0 as isize) != 0;
+            let next = if selected {
+                LIST_VIEW_ITEM_STATE_FLAGS(0)
+            } else {
+                LVIS_SELECTED
+            };
+            item_state(pane.list, row, next, LVIS_SELECTED);
+        }
+        self.changing_rows.set(false);
+        {
+            let mut listing = pane.listing.borrow_mut();
+            listing.selection_epoch = listing.selection_epoch.wrapping_add(1);
+            listing.restore = None;
+        }
+        self.refresh_selection_summary(active);
+        self.status_changed();
+    }
+
     fn save_workspace(&self) -> Result<()> {
         if self.persist {
             self.capture_tab(0);
@@ -2231,6 +2353,7 @@ impl App {
                     self.panes[index].navigation.borrow().snapshot()
                 }),
                 pairs: self.saved_pairs.borrow().clone(),
+                bookmarks: self.saved_bookmarks.borrow().clone(),
                 theme: self.theme.get(),
                 show_hidden: self.show_hidden.get(),
                 split: self.split.get(),

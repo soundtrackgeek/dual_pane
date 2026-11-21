@@ -8,6 +8,7 @@ use super::*;
 
 pub const MAX_TABS: usize = 32;
 pub const MAX_PAIRS: usize = 32;
+pub const MAX_BOOKMARKS: usize = 32;
 const HISTORY_LIMIT: usize = 32;
 
 #[derive(Clone, Default)]
@@ -191,6 +192,12 @@ pub struct SavedPair {
     pub paths: [PathBuf; 2],
 }
 
+#[derive(Clone)]
+pub struct Bookmark {
+    pub name: OsString,
+    pub path: PathBuf,
+}
+
 impl App {
     pub fn capture_tab(&self, index: usize) {
         let pane = &self.panes[index];
@@ -258,6 +265,51 @@ impl App {
         pane.navigation.borrow_mut().active = target;
         self.activate_tab(index);
         self.focus_list(index);
+    }
+
+    pub fn swap_panes(&self) {
+        let active = self.active.get();
+        self.capture_tab(0);
+        self.capture_tab(1);
+        {
+            let mut left = self.panes[0].navigation.borrow_mut();
+            let mut right = self.panes[1].navigation.borrow_mut();
+            std::mem::swap(left.current_mut(), right.current_mut());
+        }
+        self.activate_tab(0);
+        self.activate_tab(1);
+        self.focus_list(active);
+    }
+
+    pub fn mirror_pane(&self) {
+        let source = self.active.get();
+        let target = 1 - source;
+        let (path, archive) = {
+            let listing = self.panes[source].listing.borrow();
+            if listing.path.as_os_str().is_empty() {
+                return;
+            }
+            (listing.path.clone(), listing.archive.clone())
+        };
+        let same = {
+            let listing = self.panes[target].listing.borrow();
+            listing.path == path && listing.archive == archive
+        };
+        if same {
+            self.refresh(target);
+            return;
+        }
+        let location = match archive {
+            Some(folder) => Location::archive(path, folder),
+            None => Location::new(path),
+        };
+        self.capture_tab(target);
+        self.panes[target]
+            .navigation
+            .borrow_mut()
+            .current_mut()
+            .go(location);
+        self.activate_tab(target);
     }
 
     pub fn cycle_tab(&self, index: usize, previous: bool) {

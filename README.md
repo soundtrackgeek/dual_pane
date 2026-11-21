@@ -62,6 +62,11 @@ Click a drive button above a pane’s path field to open that drive’s root in 
 | Ctrl+J | Open the Transfers panel |
 | Ctrl+P | Open the folder-pair picker |
 | Ctrl+Shift+P | Save the two visible folders as a named pair |
+| Ctrl+B | Open the single-pane bookmarks & Windows Known Folders picker |
+| Ctrl+U | Swap the active tabs between the left and right panes |
+| Ctrl+= | Open the active pane's folder in the opposite pane |
+| Num + / Num - | Select / deselect visible items matching a wildcard or substring pattern |
+| Num * / Ctrl+Shift+I | Invert the current selection in the active pane |
 | F2 | Rename the selected file or folder |
 | Ctrl+M | Review a batch rename for the selected files |
 | F3 | Preview the focused file in Quick View |
@@ -81,7 +86,7 @@ You can double-click a row to open it, right-click to toggle selection or hold a
 
 Each tab remembers its folder, sort, filter, scroll position, and focused item. A single selected item is restored when it is still visible. Reopening a tab reloads its folder. Each pane keeps at least one tab, supports up to 32 tabs, and keeps Back/Forward history for the current session.
 
-Use **Pairs…** to preview the left and right paths for a saved pair. Opening a pair navigates the two active tabs and leaves the other tabs available. The picker also lets you save or remove a pair.
+Use **Pairs…** to preview the left and right paths for a saved pair. Opening a pair navigates the two active tabs and leaves the other tabs available. The picker also lets you save or remove a pair. Press **Ctrl+B** (or choose **View → Bookmarks…**) to jump just the active pane to Windows Known Folders (**User Profile**, **Desktop**, **Downloads**, **Documents**) or your saved single-folder bookmarks. Press **Ctrl+U** to swap the two active panes, **Ctrl+=** to open the active folder in the opposite pane, **Num +** / **Num -** to select or deselect items by wildcard pattern (e.g. `*.png`), and **Num \*** or **Ctrl+Shift+I** to invert the selection.
 
 The lists start in folders-first natural name order and show Windows file-type icons cached by extension. Hidden and system items are hidden by default and counted in the pane footer; press **Ctrl+H** or choose **View → Show hidden items** to show them in muted text (persisted with your workspace). Click **Name**, **Size**, or **Modified** to sort and click the same column again to reverse the order. Press **Space** on a folder (or **Alt+Shift+Enter** / **View → Calculate folder sizes** for all visible folders) to calculate recursive folder sizes in the background (skipping junctions and symlinks) and sort folders by size. The filter matches any part of a filename and ignores case. New folder visits start with a clear filter. Back and Forward return to the filter for that visit. The pane footer shows the filtered count, the selected count and total selected size, and the active drive's free space. Rows hidden by a filter leave the selection.
 

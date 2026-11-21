@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.0-rc.15] - 2026-11-21
+
+### Added
+
+- Added **Swap panes (`Ctrl+U`)** and **Mirror to opposite pane (`Ctrl+=`)** for fast dual-pane navigation (also in the View menu).
+- Added **Bookmarks & Known Folders (`Ctrl+B`)** for single-pane quick jumps to Windows Known Folders (**User Profile**, **Desktop**, **Downloads**, **Documents**) and up to 32 saved bookmarks persisted in workspace settings.
+- Added **Select by pattern (`Num +`)**, **Deselect by pattern (`Num -`)**, and **Invert selection (`Num *` / `Ctrl+Shift+I`)** with wildcard (`*`, `?`) and case-insensitive substring matching.
+
 ## [1.0.0-rc.14] - 2026-11-21
 
 ### Added

@@ -12,9 +12,11 @@ struct Template {
 
 struct Prompt<'a> {
     title: PCWSTR,
+    label: PCWSTR,
     font: HFONT,
     original: &'a OsStr,
     select_end: usize,
+    validate_filename: bool,
     value: RefCell<Option<OsString>>,
 }
 
@@ -27,9 +29,11 @@ pub fn name(
 ) -> Option<OsString> {
     let state = Prompt {
         title,
+        label: w!("Name"),
         font,
         original,
         select_end,
+        validate_filename: true,
         value: RefCell::new(None),
     };
     if let Err(error) = show_dialog(
@@ -41,6 +45,33 @@ pub fn name(
         message(
             owner,
             "Could not open name dialog",
+            &error.message(),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+    state.value.into_inner()
+}
+
+pub fn pattern(owner: HWND, font: HFONT, title: PCWSTR, initial: &OsStr) -> Option<OsString> {
+    let select_end = initial.encode_wide().count();
+    let state = Prompt {
+        title,
+        label: w!("Pattern (e.g. *.png or log)"),
+        font,
+        original: initial,
+        select_end,
+        validate_filename: false,
+        value: RefCell::new(None),
+    };
+    if let Err(error) = show_dialog(
+        owner,
+        [244, 71],
+        Some(dialog_proc),
+        LPARAM((&state as *const Prompt) as isize),
+    ) {
+        message(
+            owner,
+            "Could not open pattern dialog",
             &error.message(),
             MB_OK | MB_ICONERROR,
         );
@@ -143,7 +174,7 @@ fn initialize(dialog: HWND, state: &Prompt) -> Result<()> {
     let controls = [
         (
             w!("Static"),
-            w!("Name"),
+            state.label,
             WINDOW_EX_STYLE::default(),
             WINDOW_STYLE(0),
             170,
@@ -211,8 +242,20 @@ unsafe extern "system" fn dialog_proc(
                     return 0;
                 };
                 let value = window_text(edit);
-                if let Some(error) = invalid_name(&value) {
-                    message(window, "Invalid name", error, MB_OK | MB_ICONWARNING);
+                let issue = if state.validate_filename {
+                    invalid_name(&value)
+                } else if value.is_empty() {
+                    Some("Enter a pattern.")
+                } else {
+                    None
+                };
+                if let Some(error) = issue {
+                    let heading = if state.validate_filename {
+                        "Invalid name"
+                    } else {
+                        "Invalid pattern"
+                    };
+                    message(window, heading, error, MB_OK | MB_ICONWARNING);
                     let _ = SetFocus(Some(edit));
                 } else {
                     state.value.replace(Some(value));
