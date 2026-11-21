@@ -550,7 +550,24 @@ impl App {
                     status.push_str(&format!(" · {} hidden", grouped((total - shown) as u64)));
                 }
                 if selected != 0 {
-                    status.push_str(&format!(" · {} selected", grouped(selected as u64)));
+                    if listing.selected_unmeasured_dirs == 0 {
+                        status.push_str(&format!(
+                            " · {} selected ({})",
+                            grouped(selected as u64),
+                            format_size(listing.selected_bytes),
+                        ));
+                    } else if listing.selected_bytes > 0 {
+                        status.push_str(&format!(
+                            " · {} selected ({}+)",
+                            grouped(selected as u64),
+                            format_size(listing.selected_bytes),
+                        ));
+                    } else {
+                        status.push_str(&format!(" · {} selected", grouped(selected as u64)));
+                    }
+                }
+                if !listing.sizing_folders.is_empty() {
+                    status.push_str(" · Sizing…");
                 }
                 if let Some(archive) = &listing.archive_index
                     && archive.omitted > 0
@@ -561,7 +578,30 @@ impl App {
                 }
                 status
             };
-            label(dc, inset(status_area, s(10), 0), &status, p.muted, DT_LEFT);
+            let free_text = (!in_zip)
+                .then_some(listing.free_space)
+                .flatten()
+                .map(|bytes| format!("{} free", format_size(bytes)));
+            let inner = inset(status_area, s(10), 0);
+            if let Some(free) = &free_text {
+                let mut free_wide = wide(free);
+                free_wide.pop();
+                let mut size = SIZE::default();
+                let ok = unsafe { GetTextExtentPoint32W(dc, &free_wide, &mut size) }.as_bool();
+                let free_width = if ok { size.cx } else { s(80) };
+                if inner.right - inner.left > free_width + s(90) {
+                    let left_rect = RECT {
+                        right: inner.right - free_width - s(12),
+                        ..inner
+                    };
+                    label(dc, left_rect, &status, p.muted, DT_LEFT);
+                    label(dc, inner, free, p.muted, DT_RIGHT);
+                } else {
+                    label(dc, inner, &status, p.muted, DT_LEFT);
+                }
+            } else {
+                label(dc, inner, &status, p.muted, DT_LEFT);
+            }
         }
 
         let grip_x = (layout.gutter.left + layout.gutter.right) / 2;

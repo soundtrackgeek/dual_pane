@@ -36,7 +36,11 @@ use windows::{
 };
 
 use crate::{
-    directory::{Column, Entry, InitialScan, Rows, Scanner, Sort, Update, grouped, wide},
+    directory::{
+        Column, Entry, InitialScan, Rows, Scanner, Sort, Update, format_column_size, format_size,
+        grouped, wide,
+    },
+    folder_size::{FolderSize, SizeResult, Sizer},
     shell::{self, Icons, Operation, Transfer},
     watch::{Notice, Rename, Watcher},
 };
@@ -87,6 +91,8 @@ const CLIP_PASTE: u16 = 127;
 const OP_HISTORY: u16 = 128;
 const SHOW_HIDDEN: u16 = 129;
 const PACK_ZIP: u16 = 130;
+const CALC_FOLDER_SIZES: u16 = 135;
+const CALC_SELECTED_FOLDER_SIZES: u16 = 136;
 const LEFT_UP: u16 = 121;
 const RIGHT_UP: u16 = 122;
 const LEFT_CLEAR: u16 = 125;
@@ -119,6 +125,7 @@ enum Event {
     UndoFinished(std::io::Result<crate::undo::Applied>),
     UpdateChecked(std::result::Result<Option<crate::update::Release>, String>),
     UpdateDownloaded(std::result::Result<crate::update::Prepared, String>),
+    FolderSize(SizeResult),
 }
 
 struct Changes {
@@ -180,6 +187,11 @@ struct Listing {
     reveal: Option<(usize, Vec<u16>)>,
     restore: Option<Anchors>,
     filesystem_changes: usize,
+    free_space: Option<u64>,
+    folder_sizes: HashMap<Box<[u16]>, FolderSize>,
+    sizing_folders: HashSet<Box<[u16]>>,
+    selected_bytes: u64,
+    selected_unmeasured_dirs: usize,
 }
 
 impl Listing {
@@ -206,6 +218,8 @@ struct Pane {
     list: HWND,
     scanner: Scanner,
     watcher: Watcher,
+    sizer: Sizer,
+    size_epoch: Cell<usize>,
     listing: RefCell<Listing>,
     navigation: RefCell<Tabs>,
 }
@@ -600,11 +614,17 @@ impl Pane {
             }
         })
         .map_err(|error| windows::core::Error::new(E_FAIL, error.to_string()))?;
+        let watch_sender = sender.clone();
         let watcher = Watcher::start(index, move |id, notice| {
-            if sender.send(Event::Watch(index, id, notice)).is_ok() {
+            if watch_sender.send(Event::Watch(index, id, notice)).is_ok() {
                 wake(owner);
             }
         })?;
+        let sizer = Sizer::new(index, move |result| {
+            if sender.send(Event::FolderSize(result)).is_ok() {
+                wake(owner);
+            }
+        });
         Ok(Self {
             tabs,
             new_tab,
@@ -619,6 +639,8 @@ impl Pane {
             list,
             scanner,
             watcher,
+            sizer,
+            size_epoch: Cell::new(0),
             listing: RefCell::new(Listing::default()),
             navigation: RefCell::new(navigation),
         })
@@ -728,6 +750,11 @@ impl App {
             menu_label(menu, SORT_MODIFIED, w!("Sort by &modified\tCtrl+3"))?;
             AppendMenuW(menu, MF_SEPARATOR, 0, None)?;
             menu_label(menu, SHOW_HIDDEN, w!("Show &hidden items\tCtrl+H"))?;
+            menu_label(
+                menu,
+                CALC_FOLDER_SIZES,
+                w!("Calculate folder si&zes\tAlt+Shift+Enter"),
+            )?;
             AppendMenuW(menu, MF_SEPARATOR, 0, None)?;
             menu_label(menu, SYSTEM, w!("&System theme"))?;
             menu_label(menu, LIGHT, w!("&Light theme"))?;
@@ -897,6 +924,9 @@ impl App {
         let filter_text = wide(OsString::from_wide(&query));
         self.kill_timer(SCAN_TIMER + index);
         self.kill_timer(REFRESH_TIMER + index);
+        let size_epoch = pane.size_epoch.get().wrapping_add(1);
+        pane.size_epoch.set(size_epoch);
+        pane.sizer.cancel(size_epoch);
         let (location, initial, cached, request) = {
             let mut listing = pane.listing.borrow_mut();
             let request = listing.request.wrapping_add(1);
@@ -1085,6 +1115,11 @@ impl App {
             pane.watcher
                 .watch(listing.location, listing.path.clone(), None);
         }
+        let size_epoch = pane.size_epoch.get().wrapping_add(1);
+        pane.size_epoch.set(size_epoch);
+        pane.sizer.cancel(size_epoch);
+        listing.folder_sizes.clear();
+        listing.sizing_folders.clear();
         drop(listing);
         self.scan_folder(index);
     }
@@ -1116,6 +1151,7 @@ impl App {
         id: usize,
         preview: bool,
         entries: Result<Vec<Entry>>,
+        free_space: Option<u64>,
     ) {
         let mut listing = self.panes[index].listing.borrow_mut();
         if listing.request != id {
@@ -1128,6 +1164,7 @@ impl App {
                 listing.complete = !preview;
                 listing.error = None;
                 if !preview {
+                    listing.free_space = free_space;
                     let aliases = std::mem::take(&mut listing.scan_renames);
                     add_renames(&mut listing.display_renames, aliases);
                     if let Some(names) = listing.pending_batch_names.take() {
@@ -1237,17 +1274,192 @@ impl App {
         let sort = listing.sort;
         let query = listing.query.clone();
         let show_hidden = self.show_hidden.get() || listing.archive.is_some();
+        let folder_sizes =
+            (sort.column == Column::Size && !listing.folder_sizes.is_empty()).then(|| {
+                Arc::new(
+                    listing
+                        .folder_sizes
+                        .iter()
+                        .map(|(name, size)| (name.clone(), size.bytes))
+                        .collect::<HashMap<_, _>>(),
+                )
+            });
         listing.projecting =
             !entries.is_empty() && (sort != Sort::default() || !query.is_empty() || !show_hidden);
         listing.keep_viewport = keep_viewport;
         let projecting = listing.projecting;
         drop(listing);
         if projecting {
-            pane.scanner.project(id, entries, sort, query, show_hidden);
+            pane.scanner
+                .project(id, entries, sort, query, show_hidden, folder_sizes);
             self.status_changed();
         } else {
             pane.scanner.cancel_view(id);
             self.apply_rows(index, Rows::all(entries));
+        }
+    }
+
+    fn refresh_selection_summary(&self, index: usize) {
+        let pane = &self.panes[index];
+        let selected = pane.count();
+        let mut listing = pane.listing.borrow_mut();
+        if selected == 0 {
+            listing.selected_bytes = 0;
+            listing.selected_unmeasured_dirs = 0;
+            return;
+        }
+        let mut bytes = 0_u64;
+        let mut unmeasured = 0_usize;
+        if selected == listing.rows.len() {
+            for entry in listing.rows.iter() {
+                if !entry.directory {
+                    bytes = bytes.saturating_add(entry.size);
+                } else if let Some(size) = listing.folder_sizes.get(&entry.name) {
+                    bytes = bytes.saturating_add(size.bytes);
+                } else {
+                    unmeasured += 1;
+                }
+            }
+        } else {
+            for row in pane.selection() {
+                if let Some(entry) = listing.rows.get(row) {
+                    if !entry.directory {
+                        bytes = bytes.saturating_add(entry.size);
+                    } else if let Some(size) = listing.folder_sizes.get(&entry.name) {
+                        bytes = bytes.saturating_add(size.bytes);
+                    } else {
+                        unmeasured += 1;
+                    }
+                }
+            }
+        }
+        listing.selected_bytes = bytes;
+        listing.selected_unmeasured_dirs = unmeasured;
+    }
+
+    fn calculate_focused_folder_size(&self, index: usize) {
+        let pane = &self.panes[index];
+        let focused = send(
+            pane.list,
+            LVM_GETNEXTITEM,
+            usize::MAX,
+            LVNI_FOCUSED as isize,
+        );
+        if focused < 0 {
+            return;
+        }
+        let mut listing = pane.listing.borrow_mut();
+        if !listing.disk_ready() {
+            return;
+        }
+        let Some(entry) = listing.rows.get(focused as usize) else {
+            return;
+        };
+        if !entry.directory {
+            return;
+        }
+        let name = entry.name.clone();
+        if listing.folder_sizes.contains_key(&name) || listing.sizing_folders.contains(&name) {
+            return;
+        }
+        let path = listing.path.join(entry.filename());
+        listing.sizing_folders.insert(name.clone());
+        drop(listing);
+        pane.sizer
+            .enqueue(pane.size_epoch.get(), vec![(name, path)]);
+        unsafe {
+            let _ = InvalidateRect(Some(pane.list), None, false);
+        }
+        self.status_changed();
+    }
+
+    fn calculate_selected_folder_sizes(&self, index: usize) {
+        let pane = &self.panes[index];
+        let selected_rows: Vec<usize> = pane.selection().collect();
+        let items = {
+            let mut listing = pane.listing.borrow_mut();
+            let listing = &mut *listing;
+            if !listing.disk_ready() {
+                return;
+            }
+            let mut items = Vec::new();
+            for row in selected_rows {
+                if let Some(entry) = listing.rows.get(row)
+                    && entry.directory
+                {
+                    let name = entry.name.clone();
+                    if !listing.folder_sizes.contains_key(&name)
+                        && listing.sizing_folders.insert(name.clone())
+                    {
+                        let path = listing.path.join(entry.filename());
+                        items.push((name, path));
+                    }
+                }
+            }
+            items
+        };
+        if items.is_empty() {
+            self.calculate_focused_folder_size(index);
+            return;
+        }
+        pane.sizer.enqueue(pane.size_epoch.get(), items);
+        unsafe {
+            let _ = InvalidateRect(Some(pane.list), None, false);
+        }
+        self.status_changed();
+    }
+
+    fn calculate_all_folder_sizes(&self, index: usize) {
+        let pane = &self.panes[index];
+        let items = {
+            let mut listing = pane.listing.borrow_mut();
+            let listing = &mut *listing;
+            if !listing.disk_ready() {
+                return;
+            }
+            let mut items = Vec::new();
+            for entry in listing.rows.iter() {
+                if entry.directory {
+                    let name = entry.name.clone();
+                    if !listing.folder_sizes.contains_key(&name)
+                        && listing.sizing_folders.insert(name.clone())
+                    {
+                        let path = listing.path.join(entry.filename());
+                        items.push((name, path));
+                    }
+                }
+            }
+            items
+        };
+        if items.is_empty() {
+            return;
+        }
+        pane.sizer.enqueue(pane.size_epoch.get(), items);
+        unsafe {
+            let _ = InvalidateRect(Some(pane.list), None, false);
+        }
+        self.status_changed();
+    }
+
+    fn receive_folder_size(&self, result: SizeResult) {
+        let pane = &self.panes[result.pane];
+        if pane.size_epoch.get() != result.location {
+            return;
+        }
+        let sort_by_size = {
+            let mut listing = pane.listing.borrow_mut();
+            listing.sizing_folders.remove(&result.name);
+            listing.folder_sizes.insert(result.name, result.size);
+            listing.sort.column == Column::Size
+        };
+        self.refresh_selection_summary(result.pane);
+        if sort_by_size {
+            self.request_view(result.pane, true);
+        } else {
+            unsafe {
+                let _ = InvalidateRect(Some(pane.list), None, false);
+            }
+            self.status_changed();
         }
     }
 
@@ -1399,6 +1611,7 @@ impl App {
             }
         }
         self.changing_rows.set(false);
+        self.refresh_selection_summary(index);
         unsafe {
             let _ = InvalidateRect(Some(pane.list), None, false);
         }
@@ -1655,7 +1868,8 @@ impl App {
                     id,
                     preview,
                     entries,
-                }) => self.receive_directory(pane, id, preview, entries),
+                    free_space,
+                }) => self.receive_directory(pane, id, preview, entries, free_space),
                 Event::Directory(Update::View { pane, id, rows }) => {
                     if self.panes[pane].listing.borrow().view_request == id {
                         self.apply_rows(pane, rows);
@@ -1679,6 +1893,7 @@ impl App {
                         return;
                     }
                 }
+                Event::FolderSize(result) => self.receive_folder_size(result),
             }
         }
     }
@@ -1726,6 +1941,8 @@ impl App {
                 self.sort_by(self.active.get(), column);
             }
             SHOW_HIDDEN => self.toggle_hidden(),
+            CALC_FOLDER_SIZES => self.calculate_all_folder_sizes(self.active.get()),
+            CALC_SELECTED_FOLDER_SIZES => self.calculate_selected_folder_sizes(self.active.get()),
             VIEW => self.view_menu(),
             LEFT_UP => self.parent(0),
             RIGHT_UP => self.parent(1),
@@ -1763,6 +1980,7 @@ impl App {
                 PACK_ZIP,
                 disk_ready && selected > 0 && self.can_queue_transfer(),
             );
+            enable(CALC_FOLDER_SIZES, disk_ready);
             let hidden_flag = if self.show_hidden.get() {
                 MF_CHECKED
             } else {
@@ -1836,6 +2054,10 @@ impl App {
                 if pane.listing.borrow().ready() {
                     item_state(pane.list, usize::MAX, LVIS_SELECTED, LVIS_SELECTED);
                 }
+            }
+            VK_SPACE if in_list && !ctrl && !shift => {
+                self.calculate_focused_folder_size(active);
+                return false;
             }
             VK_BACK if in_list => self.parent(active),
             VK_F3 if in_list => self.show_quick_view(),
@@ -1919,6 +2141,14 @@ impl App {
                     if item.mask.contains(LVIF_TEXT) {
                         if item.iSubItem == 0 {
                             copy_text(item, &entry.name);
+                        } else if item.iSubItem == 1 && entry.directory {
+                            if let Some(size) = listing.folder_sizes.get(&entry.name) {
+                                copy_text(item, &wide(format_column_size(size.bytes)));
+                            } else if listing.sizing_folders.contains(&entry.name) {
+                                copy_text(item, &wide("…"));
+                            } else {
+                                copy_text(item, &[0]);
+                            }
                         } else {
                             copy_text(item, &wide(entry.detail(item.iSubItem)));
                         }
@@ -1981,6 +2211,7 @@ impl App {
                 listing.selection_epoch = listing.selection_epoch.wrapping_add(1);
                 listing.restore = None;
                 drop(listing);
+                self.refresh_selection_summary(index);
                 self.status_changed()
             }
             LVN_BEGINSCROLL if !self.changing_rows.get() => {
@@ -2028,6 +2259,14 @@ impl App {
                 let pane = &self.panes[self.active.get()];
                 if unsafe { GetFocus() } == pane.list {
                     self.show_properties();
+                } else {
+                    return false;
+                }
+            }
+            VK_RETURN if shift => {
+                let pane = &self.panes[self.active.get()];
+                if unsafe { GetFocus() } == pane.list {
+                    self.calculate_all_folder_sizes(self.active.get());
                 } else {
                     return false;
                 }

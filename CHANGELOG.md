@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.14] - 2026-11-21
+
+### Added
+
+- Added live total selected size and active drive free space to each pane's footer.
+- Added on-demand recursive folder size calculation (**Space** on a focused folder, **Alt+Shift+Enter** or **View → Calculate folder sizes** for all visible folders, and item/folder context menu actions) running in a bounded, cancellable background worker that skips directory junctions and symlinks and enables sorting folders by **Size** (`Ctrl+2`).
+
 ## [1.0.0-rc.13] - 2026-11-21
 
 ### Added

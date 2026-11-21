@@ -240,8 +240,21 @@ impl App {
             } else if on_item && selected > 0 {
                 let can_open = focused_item.is_some();
                 let can_quick_view = focused_item.as_ref().is_some_and(|(_, dir)| !*dir);
+                let has_selected_dir = {
+                    let listing = pane.listing.borrow();
+                    pane.selection()
+                        .any(|row| listing.rows.get(row).is_some_and(|entry| entry.directory))
+                };
                 append_item(menu, OPEN_ITEM, w!("&Open\tEnter"), can_open);
                 append_item(menu, QUICK_VIEW, w!("&Quick View…\tF3"), can_quick_view);
+                if has_selected_dir {
+                    append_item(
+                        menu,
+                        CALC_SELECTED_FOLDER_SIZES,
+                        w!("Calculate folder si&ze\tSpace"),
+                        disk_ready,
+                    );
+                }
                 let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
                 append_item(menu, COPY, w!("Cop&y to opposite pane\tF5"), can_transfer);
                 append_item(menu, MOVE, w!("&Move to opposite pane\tF6"), can_transfer);
@@ -282,6 +295,12 @@ impl App {
             } else {
                 append_item(menu, CLIP_PASTE, w!("&Paste\tCtrl+V"), disk_ready);
                 append_item(menu, CREATE_FOLDER, w!("&New folder…\tF7"), disk_ready);
+                append_item(
+                    menu,
+                    CALC_FOLDER_SIZES,
+                    w!("Calculate folder si&zes\tAlt+Shift+Enter"),
+                    disk_ready,
+                );
                 append_item(menu, REFRESH, w!("&Refresh\tCtrl+R"), true);
                 let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
                 append_item(menu, COPY_PATH, w!("Copy folder pat&h\tShift+Alt+C"), ready);

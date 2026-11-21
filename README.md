@@ -72,6 +72,8 @@ Click a drive button above a pane’s path field to open that drive’s root in 
 | Shift+Alt+C | Copy the full path(s) of the selected items or active folder to the clipboard |
 | Alt+T | Open a terminal in the active folder (or the single selected folder) |
 | Alt+Enter | Open Windows Properties for the selected item or active folder |
+| Space | Toggle selection and calculate the focused folder's recursive size |
+| Alt+Shift+Enter | Calculate recursive sizes for all visible folders in the active pane |
 | Shift+F10 / Hold right-click (2s) | Open the item or folder context menu in a file list |
 | Alt+V | Open the View menu |
 
@@ -81,7 +83,7 @@ Each tab remembers its folder, sort, filter, scroll position, and focused item. 
 
 Use **Pairs…** to preview the left and right paths for a saved pair. Opening a pair navigates the two active tabs and leaves the other tabs available. The picker also lets you save or remove a pair.
 
-The lists start in folders-first natural name order and show Windows file-type icons cached by extension. Hidden and system items are hidden by default and counted in the pane footer; press **Ctrl+H** or choose **View → Show hidden items** to show them in muted text (persisted with your workspace). Click **Name**, **Size**, or **Modified** to sort and click the same column again to reverse the order. The filter matches any part of a filename and ignores case. New folder visits start with a clear filter. Back and Forward return to the filter for that visit. The pane footer shows the filtered count and the selected count. Rows hidden by a filter leave the selection.
+The lists start in folders-first natural name order and show Windows file-type icons cached by extension. Hidden and system items are hidden by default and counted in the pane footer; press **Ctrl+H** or choose **View → Show hidden items** to show them in muted text (persisted with your workspace). Click **Name**, **Size**, or **Modified** to sort and click the same column again to reverse the order. Press **Space** on a folder (or **Alt+Shift+Enter** / **View → Calculate folder sizes** for all visible folders) to calculate recursive folder sizes in the background (skipping junctions and symlinks) and sort folders by size. The filter matches any part of a filename and ignores case. New folder visits start with a clear filter. Back and Forward return to the filter for that visit. The pane footer shows the filtered count, the selected count and total selected size, and the active drive's free space. Rows hidden by a filter leave the selection.
 
 Both local and UNC paths work for browsing. Filehelm watches each open folder for changes and preserves the selected items and viewport when possible. An unsupported or disconnected watch leaves **Ctrl+R** available for a manual refresh. If Windows cannot recycle the selection, it presents a separate warning before a permanent deletion.
 

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     ffi::{OsStr, OsString},
     os::windows::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
@@ -16,7 +17,7 @@ use windows::{
         Storage::FileSystem::{
             FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_SYSTEM,
             FIND_FIRST_EX_LARGE_FETCH, FindClose, FindExInfoBasic, FindExSearchNameMatch,
-            FindFirstFileExW, FindNextFileW, WIN32_FIND_DATAW,
+            FindFirstFileExW, FindNextFileW, GetDiskFreeSpaceExW, WIN32_FIND_DATAW,
         },
         System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTimeEx},
         UI::Shell::StrCmpLogicalW,
@@ -56,17 +57,53 @@ impl Entry {
 
     pub fn detail(&self, column: i32) -> String {
         match column {
-            1 if !self.directory => {
-                if self.size < 1024 {
-                    format!("{} B", self.size)
-                } else {
-                    format!("{} KB", grouped(self.size.div_ceil(1024)))
-                }
-            }
+            1 if !self.directory => format_column_size(self.size),
             2 => display_time(self.modified),
             _ => String::new(),
         }
     }
+}
+
+pub fn format_column_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else {
+        format!("{} KB", grouped(bytes.div_ceil(1024)))
+    }
+}
+
+pub fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if value >= 100.0 {
+        format!("{value:.0} {}", UNITS[unit])
+    } else if value >= 10.0 {
+        format!("{value:.1} {}", UNITS[unit])
+    } else {
+        format!("{value:.2} {}", UNITS[unit])
+    }
+}
+
+pub fn disk_free_space(path: &Path) -> Option<u64> {
+    let mut available = 0_u64;
+    let extended = extended_path(path);
+    if unsafe { GetDiskFreeSpaceExW(PCWSTR(extended.as_ptr()), Some(&mut available), None, None) }
+        .is_ok()
+    {
+        return Some(available);
+    }
+    let plain = wide(path);
+    unsafe { GetDiskFreeSpaceExW(PCWSTR(plain.as_ptr()), Some(&mut available), None, None) }
+        .ok()
+        .map(|()| available)
 }
 
 pub fn display_time(timestamp: FILETIME) -> String {
@@ -202,6 +239,7 @@ fn project(
     sort: Sort,
     query: &[u16],
     show_hidden: bool,
+    folder_sizes: Option<&HashMap<Box<[u16]>, u64>>,
     current: impl Fn() -> bool,
 ) -> Option<Rows> {
     if !current() {
@@ -236,17 +274,35 @@ fn project(
             let (left, right) = (&entries[a], &entries[b]);
             right.directory.cmp(&left.directory).then_with(|| {
                 let key = match sort.column {
-                    Column::Name => a.cmp(&b),
-                    Column::Size if !left.directory => left.size.cmp(&right.size),
-                    Column::Size => std::cmp::Ordering::Equal,
+                    Column::Name => {
+                        let ord = a.cmp(&b);
+                        if sort.descending { ord.reverse() } else { ord }
+                    }
+                    Column::Size if !left.directory => {
+                        let ord = left.size.cmp(&right.size);
+                        if sort.descending { ord.reverse() } else { ord }
+                    }
+                    Column::Size => {
+                        let left_size = folder_sizes.and_then(|map| map.get(&left.name).copied());
+                        let right_size = folder_sizes.and_then(|map| map.get(&right.name).copied());
+                        match (left_size, right_size) {
+                            (Some(l), Some(r)) => {
+                                let ord = l.cmp(&r);
+                                if sort.descending { ord.reverse() } else { ord }
+                            }
+                            (Some(_), None) => std::cmp::Ordering::Less,
+                            (None, Some(_)) => std::cmp::Ordering::Greater,
+                            (None, None) => std::cmp::Ordering::Equal,
+                        }
+                    }
                     Column::Modified => {
                         let timestamp = |entry: &Entry| {
                             (entry.modified.dwHighDateTime, entry.modified.dwLowDateTime)
                         };
-                        timestamp(left).cmp(&timestamp(right))
+                        let ord = timestamp(left).cmp(&timestamp(right));
+                        if sort.descending { ord.reverse() } else { ord }
                     }
                 };
-                let key = if sort.descending { key.reverse() } else { key };
                 key.then_with(|| a.cmp(&b))
             })
         });
@@ -270,6 +326,7 @@ struct Projection {
     sort: Sort,
     query: Vec<u16>,
     show_hidden: bool,
+    folder_sizes: Option<Arc<HashMap<Box<[u16]>, u64>>>,
 }
 
 enum Job {
@@ -332,6 +389,7 @@ pub enum Update {
         id: usize,
         preview: bool,
         entries: Result<Vec<Entry>, windows::core::Error>,
+        free_space: Option<u64>,
     },
     View {
         pane: usize,
@@ -389,13 +447,14 @@ impl Scanner {
                                     }
                                     continue;
                                 }
-                                let publish = |preview, entries| {
+                                let publish = |preview, entries, free_space| {
                                     if current() {
                                         deliver(Update::Directory {
                                             pane,
                                             id: request.id,
                                             preview,
                                             entries,
+                                            free_space,
                                         });
                                     }
                                 };
@@ -403,10 +462,13 @@ impl Scanner {
                                     if request.preview {
                                         let mut first = rows.to_vec();
                                         sort(&mut first);
-                                        publish(true, Ok(first));
+                                        publish(true, Ok(first), None);
                                     }
                                 });
-                                publish(false, entries);
+                                let free_space = (entries.is_ok() && current())
+                                    .then(|| disk_free_space(&request.directory))
+                                    .flatten();
+                                publish(false, entries, free_space);
                             }
                             Job::Projection(request) => {
                                 let current =
@@ -416,6 +478,7 @@ impl Scanner {
                                     request.sort,
                                     &request.query,
                                     request.show_hidden,
+                                    request.folder_sizes.as_deref(),
                                     current,
                                 ) {
                                     deliver(Update::View {
@@ -477,6 +540,7 @@ impl Scanner {
         sort: Sort,
         query: Vec<u16>,
         show_hidden: bool,
+        folder_sizes: Option<Arc<HashMap<Box<[u16]>, u64>>>,
     ) {
         let mut pending = self.0.pending.lock().unwrap();
         self.0.view_id.store(id, Ordering::Relaxed);
@@ -486,6 +550,7 @@ impl Scanner {
             sort,
             query,
             show_hidden,
+            folder_sizes,
         });
         self.0.ready.notify_one();
     }
@@ -696,6 +761,7 @@ mod tests {
                     sort(Column::Size, false),
                     &query,
                     true,
+                    None,
                     || true
                 )
                 .unwrap()
@@ -709,14 +775,20 @@ mod tests {
                     sort(Column::Modified, true),
                     &query,
                     true,
+                    None,
                     || true
                 )
                 .unwrap()
             ),
             ["Tape Folder", "TAPE 1.txt", "tape 3.txt"],
         );
-        assert!(project(entries.clone(), Sort::default(), &query, true, || false).is_none());
-        let all = project(entries.clone(), Sort::default(), &[], true, || true).unwrap();
+        assert!(
+            project(entries.clone(), Sort::default(), &query, true, None, || {
+                false
+            })
+            .is_none()
+        );
+        let all = project(entries.clone(), Sort::default(), &[], true, None, || true).unwrap();
         assert!(Arc::ptr_eq(&entries, &all.entries));
         assert!(all.order.is_none());
 
@@ -732,13 +804,67 @@ mod tests {
             entry("readme.md", false, 1, 0),
         ]);
         assert_eq!(
-            names(project(mixed.clone(), Sort::default(), &[], false, || true).unwrap()),
+            names(project(mixed.clone(), Sort::default(), &[], false, None, || true).unwrap()),
             ["readme.md"],
         );
         assert_eq!(
-            names(project(mixed, Sort::default(), &[], true, || true).unwrap()),
+            names(project(mixed, Sort::default(), &[], true, None, || true).unwrap()),
             [".env", "desktop.ini", "readme.md"],
         );
+
+        let folders = Arc::new(vec![
+            entry("Alpha", true, 0, 0),
+            entry("Beta", true, 0, 0),
+            entry("Gamma", true, 0, 0),
+        ]);
+        let mut sizes = HashMap::new();
+        sizes.insert(wide("Alpha").into_boxed_slice(), 500);
+        sizes.insert(wide("Gamma").into_boxed_slice(), 5_000);
+        assert_eq!(
+            names(
+                project(
+                    folders.clone(),
+                    sort(Column::Size, true),
+                    &[],
+                    true,
+                    Some(&sizes),
+                    || true
+                )
+                .unwrap()
+            ),
+            ["Gamma", "Alpha", "Beta"],
+        );
+        assert_eq!(
+            names(
+                project(
+                    folders,
+                    sort(Column::Size, false),
+                    &[],
+                    true,
+                    Some(&sizes),
+                    || true
+                )
+                .unwrap()
+            ),
+            ["Alpha", "Gamma", "Beta"],
+        );
+    }
+
+    #[test]
+    fn formats_human_readable_sizes() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(1_536), "1.50 KB");
+        assert_eq!(format_size(15 * 1024), "15.0 KB");
+        assert_eq!(format_size(512 * 1024), "512 KB");
+        assert_eq!(format_size(18 * 1024 * 1024 + 400 * 1024), "18.4 MB");
+        assert_eq!(format_size(142 * 1024 * 1024 * 1024), "142 GB");
+    }
+
+    #[test]
+    fn reads_disk_free_space_for_temp_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(disk_free_space(dir.path()).is_some());
     }
 
     #[test]

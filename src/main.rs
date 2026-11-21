@@ -16,6 +16,8 @@ mod file_data;
 #[cfg(windows)]
 mod find;
 #[cfg(windows)]
+mod folder_size;
+#[cfg(windows)]
 mod preview;
 #[cfg(windows)]
 mod shell;
