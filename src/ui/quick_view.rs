@@ -17,7 +17,7 @@ const CLOSE: u16 = IDCANCEL.0 as u16;
 const MAX_WORKERS: usize = 2;
 
 struct Item {
-    pane: usize,
+    pane: Option<usize>,
     location: usize,
     row: usize,
     path: PathBuf,
@@ -77,7 +77,7 @@ impl App {
             (listing.path.join(filename), None)
         };
         Some(Item {
-            pane,
+            pane: Some(pane),
             location: listing.location,
             row,
             path,
@@ -100,6 +100,21 @@ impl App {
         else {
             return;
         };
+        self.open_quick_view_item(item);
+    }
+
+    pub fn show_quick_view_path(&self, path: PathBuf, entry: Entry) {
+        self.open_quick_view_item(Item {
+            pane: None,
+            location: 0,
+            row: 0,
+            path,
+            archive_member: None,
+            entry,
+        });
+    }
+
+    fn open_quick_view_item(&self, item: Item) {
         let viewer = &self.quick_view;
         let mut panel = viewer.window.get();
         let first = panel.0.is_null();
@@ -280,7 +295,8 @@ impl App {
     fn adjacent(&self, offset: isize) -> Option<(usize, usize)> {
         let viewer = self.quick_view.item.borrow();
         let item = viewer.as_ref()?;
-        let listing = self.panes[item.pane].listing.borrow();
+        let pane = item.pane?;
+        let listing = self.panes[pane].listing.borrow();
         if listing.location != item.location || listing.projecting {
             return None;
         }
@@ -293,7 +309,7 @@ impl App {
         // Folders are grouped before files in every supported sort.
         let row = row.checked_add_signed(offset)?;
         listing.rows.get(row).filter(|entry| !entry.directory)?;
-        Some((item.pane, row))
+        Some((pane, row))
     }
 
     pub fn update_quick_view_navigation(&self) {

@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use super::*;
-use crate::find::{self, Hit, Query, Report, Update};
+use crate::find::{self, ContentQuery, Hit, Query, Report, SearchFilter, Update};
 
 const QUERY: u16 = 621;
 const SCOPE: u16 = 622;
@@ -13,6 +13,13 @@ const SUMMARY: u16 = 624;
 const WARNING: u16 = 625;
 const STOP: u16 = 626;
 const OPEN: u16 = 627;
+const CONTENT: u16 = 628;
+const MATCH_CASE: u16 = 629;
+const SIZE_FILTER: u16 = 630;
+const DATE_FILTER: u16 = 631;
+const PREVIEW: u16 = 632;
+const COPY_PATH_BTN: u16 = 633;
+const OPEN_OPPOSITE: u16 = 634;
 const SEARCH: u16 = IDOK.0 as u16;
 const CLOSE: u16 = IDCANCEL.0 as u16;
 const MAX_RESULTS: usize = 100_000;
@@ -135,7 +142,7 @@ impl App {
         }
         match prompt::create_panel(
             self.window,
-            [475, 251],
+            [495, 275],
             WINDOW_STYLE(0),
             Some(panel_proc),
             LPARAM((self as *const App) as isize),
@@ -162,11 +169,15 @@ impl App {
 
     fn start_find(&self, window: HWND) {
         let query = window_text(control(window, QUERY));
-        if query.is_empty() {
+        let content_raw = window_text(control(window, CONTENT));
+        let content_text = content_raw.to_string_lossy();
+        let size_index = send(control(window, SIZE_FILTER), CB_GETCURSEL, 0, 0);
+        let date_index = send(control(window, DATE_FILTER), CB_GETCURSEL, 0, 0);
+        if query.is_empty() && content_text.is_empty() && size_index <= 0 && date_index <= 0 {
             message(
                 window,
                 "Find Files",
-                "Enter part of a filename or a wildcard such as *.flac.",
+                "Enter a filename pattern, text to search inside files, or choose a size/modified filter.",
                 MB_OK | MB_ICONINFORMATION,
             );
             unsafe {
@@ -174,7 +185,32 @@ impl App {
             }
             return;
         }
-        let query = Arc::new(Query::new(query.encode_wide().collect()));
+        let name = (!query.is_empty()).then(|| Query::new(query.encode_wide().collect()));
+        let case_sensitive = send(control(window, MATCH_CASE), BM_GETCHECK, 0, 0) == 1;
+        let content =
+            (!content_text.is_empty()).then(|| ContentQuery::new(&content_text, case_sensitive));
+        let (min_size, max_size) = match size_index {
+            1 => (Some(1024 * 1024), None),
+            2 => (Some(10 * 1024 * 1024), None),
+            3 => (Some(100 * 1024 * 1024), None),
+            4 => (None, Some(1024 * 1024)),
+            5 => (None, Some(0)),
+            _ => (None, None),
+        };
+        let modified_after = match date_index {
+            1 => Some(find::cutoff_filetime_days(1)),
+            2 => Some(find::cutoff_filetime_days(7)),
+            3 => Some(find::cutoff_filetime_days(30)),
+            4 => Some(find::cutoff_filetime_days(365)),
+            _ => None,
+        };
+        let filter = Arc::new(SearchFilter {
+            name,
+            content,
+            min_size,
+            max_size,
+            modified_after,
+        });
         let active = self.active.get();
         let both = send(control(window, SCOPE), CB_GETCURSEL, 0, 0) == 1;
         if self.panes[active].listing.borrow().archive.is_some()
@@ -210,7 +246,7 @@ impl App {
             let worker = Worker {
                 pane,
                 path: path.clone(),
-                query: query.clone(),
+                filter: filter.clone(),
                 stopped: stopped.clone(),
                 sender: sender.clone(),
                 owner: self.window.0 as usize,
@@ -278,7 +314,8 @@ impl App {
             None => (
                 0,
                 false,
-                "Search subfolders by filename. Use * or ? for wildcards.".into(),
+                "Search subfolders by filename (* or ?), file contents, size, or modified date."
+                    .into(),
                 None,
             ),
             Some(session) => {
@@ -366,7 +403,68 @@ impl App {
         }
     }
 
-    fn open_find_hit(&self, window: HWND, row: Option<usize>) {
+    fn selected_find_hit(
+        &self,
+        window: HWND,
+        row: Option<usize>,
+    ) -> Option<(usize, PathBuf, Entry)> {
+        let list = control(window, RESULTS);
+        let row = row.or_else(|| {
+            usize::try_from(send(
+                list,
+                LVM_GETNEXTITEM,
+                usize::MAX,
+                LVNI_SELECTED as isize,
+            ))
+            .ok()
+        })?;
+        self.find_files
+            .session
+            .borrow()
+            .as_ref()
+            .and_then(|session| {
+                let hit = session.rows.get(row)?;
+                let filename = OsString::from_wide(&hit.name[..hit.name.len() - 1]);
+                let full_path = hit.folder.join(filename);
+                let entry = Entry {
+                    name: hit.name.clone(),
+                    directory: false,
+                    size: hit.size,
+                    modified: hit.modified,
+                    attributes: 0,
+                };
+                Some((hit.pane, full_path, entry))
+            })
+    }
+
+    fn preview_find_hit(&self, window: HWND) {
+        if let Some((_, path, entry)) = self.selected_find_hit(window, None) {
+            self.show_quick_view_path(path, entry);
+        }
+    }
+
+    fn copy_find_hit_path(&self, window: HWND) {
+        let Some((_, path, _)) = self.selected_find_hit(window, None) else {
+            return;
+        };
+        let text = crate::file_data::format_paths_text(&[path]);
+        match crate::file_data::clipboard_write_text(window, &text) {
+            Ok(_) => {
+                *self.operation_status.borrow_mut() = "Copied path to clipboard".into();
+                self.status_changed();
+            }
+            Err(error) => {
+                message(
+                    window,
+                    "Could not copy path",
+                    &error.message(),
+                    MB_OK | MB_ICONWARNING,
+                );
+            }
+        }
+    }
+
+    fn open_find_hit(&self, window: HWND, row: Option<usize>, opposite: bool) {
         let list = control(window, RESULTS);
         let row = row.or_else(|| {
             usize::try_from(send(
@@ -389,7 +487,8 @@ impl App {
                 location.anchors.focused = name.to_vec();
                 location.anchors.selected = name.to_vec();
                 location.anchors.top = name.to_vec();
-                Some((hit.pane, location))
+                let pane = if opposite { 1 - hit.pane } else { hit.pane };
+                Some((pane, location))
             });
         let Some((pane, location)) = target else {
             return;
@@ -403,7 +502,7 @@ impl App {
             message(
                 window,
                 "Tab limit reached",
-                "Close a tab on the result’s side, then open the result again.",
+                "Close a tab on the target side, then open the result again.",
                 MB_OK | MB_ICONINFORMATION,
             );
             return;
@@ -418,11 +517,28 @@ impl App {
     }
 
     pub fn find_panel_key(&self, panel: HWND, msg: &MSG) -> bool {
-        if panel != self.find_files.window.get() || msg.message != WM_KEYDOWN {
+        if panel != self.find_files.window.get()
+            || !matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN)
+        {
             return false;
         }
-        if VIRTUAL_KEY(msg.wParam.0 as u16) == VK_RETURN && msg.hwnd == control(panel, RESULTS) {
-            self.open_find_hit(panel, None);
+        let key = VIRTUAL_KEY(msg.wParam.0 as u16);
+        let on_results = msg.hwnd == control(panel, RESULTS);
+        if msg.message == WM_KEYDOWN && on_results {
+            if key == VK_RETURN {
+                self.open_find_hit(panel, None, false);
+                return true;
+            }
+            if key == VK_F3 {
+                self.preview_find_hit(panel);
+                return true;
+            }
+        }
+        let alt = msg.message == WM_SYSKEYDOWN && msg.lParam.0 & (1 << 29) != 0;
+        let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+        let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+        if alt && shift && !ctrl && key == VK_C && on_results {
+            self.copy_find_hit_path(panel);
             return true;
         }
         false
@@ -432,7 +548,7 @@ impl App {
 struct Worker {
     pane: usize,
     path: PathBuf,
-    query: Arc<Query>,
+    filter: Arc<SearchFilter>,
     stopped: Arc<AtomicBool>,
     sender: SyncSender<Update>,
     owner: usize,
@@ -446,7 +562,7 @@ impl Worker {
             .spawn(move || {
                 let _slot = slot;
                 let current = || !self.stopped.load(Ordering::Relaxed);
-                find::scan(self.path, self.pane, &self.query, current, |update| {
+                find::scan(self.path, self.pane, &self.filter, current, |update| {
                     current()
                         && self.sender.send(update).is_ok()
                         && unsafe {
@@ -475,8 +591,10 @@ fn enable_open(window: HWND) {
         usize::MAX,
         LVNI_SELECTED as isize,
     ) >= 0;
-    unsafe {
-        let _ = EnableWindow(control(window, OPEN), selected);
+    for id in [OPEN, OPEN_OPPOSITE, PREVIEW, COPY_PATH_BTN] {
+        unsafe {
+            let _ = EnableWindow(control(window, id), selected);
+        }
     }
 }
 
@@ -495,6 +613,8 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
     let static_style = WINDOW_STYLE(0);
     let tab = WS_TABSTOP;
     let edit = WINDOW_STYLE(ES_AUTOHSCROLL as u32);
+    let combo = tab | WINDOW_STYLE(CBS_DROPDOWNLIST as u32);
+    let check = tab | WINDOW_STYLE(BS_AUTOCHECKBOX as u32);
     let controls = [
         (
             w!("Static"),
@@ -510,7 +630,7 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
             WS_EX_CLIENTEDGE,
             tab | edit,
             QUERY,
-            [59, 8, 287, 24],
+            [59, 8, 297, 24],
         ),
         (
             w!("Static"),
@@ -518,15 +638,71 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
             normal,
             static_style,
             0,
-            [295, 12, 309, 24],
+            [305, 12, 319, 24],
         ),
         (
             w!("ComboBox"),
             w!(""),
             normal,
-            tab | WINDOW_STYLE(CBS_DROPDOWNLIST as u32),
+            combo,
             SCOPE,
-            [313, 8, 466, 65],
+            [323, 8, 486, 65],
+        ),
+        (
+            w!("Static"),
+            w!("Con&taining"),
+            normal,
+            static_style,
+            0,
+            [9, 33, 56, 45],
+        ),
+        (
+            w!("Edit"),
+            w!(""),
+            WS_EX_CLIENTEDGE,
+            tab | edit,
+            CONTENT,
+            [59, 29, 297, 45],
+        ),
+        (
+            w!("Button"),
+            w!("Match &case"),
+            normal,
+            check,
+            MATCH_CASE,
+            [305, 31, 390, 44],
+        ),
+        (
+            w!("Static"),
+            w!("Si&ze"),
+            normal,
+            static_style,
+            0,
+            [9, 54, 56, 66],
+        ),
+        (
+            w!("ComboBox"),
+            w!(""),
+            normal,
+            combo,
+            SIZE_FILTER,
+            [59, 50, 165, 130],
+        ),
+        (
+            w!("Static"),
+            w!("&Modified"),
+            normal,
+            static_style,
+            0,
+            [173, 54, 212, 66],
+        ),
+        (
+            w!("ComboBox"),
+            w!(""),
+            normal,
+            combo,
+            DATE_FILTER,
+            [216, 50, 325, 130],
         ),
         (
             w!("Button"),
@@ -534,7 +710,7 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
             normal,
             tab | WINDOW_STYLE(BS_DEFPUSHBUTTON as u32),
             SEARCH,
-            [59, 30, 116, 47],
+            [364, 50, 422, 67],
         ),
         (
             w!("Button"),
@@ -542,7 +718,7 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
             normal,
             tab,
             STOP,
-            [122, 30, 179, 47],
+            [428, 50, 486, 67],
         ),
         (
             WC_LISTVIEWW,
@@ -552,7 +728,7 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
                 LVS_REPORT | LVS_OWNERDATA | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER,
             ),
             RESULTS,
-            [9, 55, 466, 193],
+            [9, 74, 486, 214],
         ),
         (
             w!("Static"),
@@ -560,7 +736,7 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
             normal,
             static_style,
             SUMMARY,
-            [9, 199, 466, 212],
+            [9, 220, 486, 232],
         ),
         (
             w!("Edit"),
@@ -568,7 +744,31 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
             normal,
             tab | edit | WINDOW_STYLE(ES_READONLY as u32),
             WARNING,
-            [9, 213, 466, 227],
+            [9, 234, 486, 247],
+        ),
+        (
+            w!("Button"),
+            w!("Quick &View (F3)"),
+            normal,
+            tab,
+            PREVIEW,
+            [9, 251, 96, 268],
+        ),
+        (
+            w!("Button"),
+            w!("Copy &path"),
+            normal,
+            tab,
+            COPY_PATH_BTN,
+            [102, 251, 168, 268],
+        ),
+        (
+            w!("Button"),
+            w!("Open o&pposite"),
+            normal,
+            tab,
+            OPEN_OPPOSITE,
+            [174, 251, 268, 268],
         ),
         (
             w!("Button"),
@@ -576,7 +776,7 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
             normal,
             tab,
             OPEN,
-            [269, 228, 402, 245],
+            [274, 251, 418, 268],
         ),
         (
             w!("Button"),
@@ -584,13 +784,14 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
             normal,
             tab,
             CLOSE,
-            [409, 228, 466, 245],
+            [424, 251, 486, 268],
         ),
     ];
     for template in controls {
         prompt::add_control(window, app.font.get(), template)?;
     }
     send(control(window, QUERY), EM_SETLIMITTEXT, 255, 0);
+    send(control(window, CONTENT), EM_SETLIMITTEXT, 255, 0);
     let scope = control(window, SCOPE);
     for label in [
         w!("Active folder and subfolders"),
@@ -599,6 +800,29 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
         send(scope, CB_ADDSTRING, 0, label.as_ptr() as isize);
     }
     send(scope, CB_SETCURSEL, 0, 0);
+    let size_filter = control(window, SIZE_FILTER);
+    for label in [
+        w!("Any size"),
+        w!("At least 1 MB"),
+        w!("At least 10 MB"),
+        w!("At least 100 MB"),
+        w!("At most 1 MB"),
+        w!("Empty (0 B)"),
+    ] {
+        send(size_filter, CB_ADDSTRING, 0, label.as_ptr() as isize);
+    }
+    send(size_filter, CB_SETCURSEL, 0, 0);
+    let date_filter = control(window, DATE_FILTER);
+    for label in [
+        w!("Any time"),
+        w!("Last 24 hours"),
+        w!("Last 7 days"),
+        w!("Last 30 days"),
+        w!("Last 365 days"),
+    ] {
+        send(date_filter, CB_ADDSTRING, 0, label.as_ptr() as isize);
+    }
+    send(date_filter, CB_SETCURSEL, 0, 0);
     send(window, DM_SETDEFID, SEARCH.into(), 0);
     let list = control(window, RESULTS);
     send(list, CCM_SETUNICODEFORMAT, 1, 0);
@@ -669,7 +893,10 @@ unsafe extern "system" fn panel_proc(
             WM_COMMAND => match wparam.0 as u16 {
                 SEARCH => app.start_find(window),
                 STOP => app.stop_find(window),
-                OPEN => app.open_find_hit(window, None),
+                PREVIEW => app.preview_find_hit(window),
+                COPY_PATH_BTN => app.copy_find_hit_path(window),
+                OPEN_OPPOSITE => app.open_find_hit(window, None, true),
+                OPEN => app.open_find_hit(window, None, false),
                 CLOSE => {
                     let _ = DestroyWindow(window);
                 }
@@ -691,7 +918,7 @@ unsafe extern "system" fn panel_proc(
                     NM_DBLCLK => {
                         let data = &*(lparam.0 as *const NMITEMACTIVATE);
                         if let Ok(row) = usize::try_from(data.iItem) {
-                            app.open_find_hit(window, Some(row));
+                            app.open_find_hit(window, Some(row), false);
                         }
                     }
                     _ => {}

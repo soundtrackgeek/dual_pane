@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.0-rc.16] - 2026-11-21
+
+### Added
+
+- Added **Containing text** search (with **Match case** toggle) to **Find Files (`Alt+F7`)**, streaming bounded chunks up to 16 MiB per file across UTF-8 and UTF-16 LE text files while automatically skipping binary files and respecting **Stop**.
+- Added **Size** and **Modified** preset filters to **Find Files** (allowing filename-only, content-only, or combined searches).
+- Added direct result actions in **Find Files**: **Quick View (`F3`)**, **Copy path (`Shift+Alt+C`)**, and **Open in opposite pane**.
+
 ## [1.0.0-rc.15] - 2026-11-21
 
 ### Added

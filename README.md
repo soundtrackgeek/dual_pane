@@ -136,11 +136,11 @@ Preview reads run on demand in the background. If a network read stalls, you can
 
 ## Find files
 
-Press **Alt+F7** or choose **View → Find files…**. Enter part of a filename or use a wildcard such as `*.flac`. A wildcard matches the whole filename, with `*` matching zero or more characters and `?` matching one. Searches ignore case. Choose the active folder or both folders to search their subfolders. The app uses the folders open when you press **Find**.
+Press **Alt+F7** or choose **View → Find files…**. Enter part of a filename or a wildcard such as `*.flac` (with `*` matching zero or more characters and `?` matching one, ignoring case), optionally enter **Containing** text (with a **Match case** option) to search inside UTF-8 and UTF-16 text files, and/or choose **Size** and **Modified** filters. You can leave the filename blank when searching by content, size, or modified date. Content search streams up to 16 MiB per file in bounded chunks and automatically skips binary files. Choose the active folder or both folders to search their subfolders. The app uses the folders open when you press **Find**.
 
 Results appear as files are found, and you can keep browsing during the search. **Stop** keeps the matches already displayed. If Windows is waiting for a network response, the worker can take longer to exit. The search skips directory junctions, symlinks, and other directory reparse points and reports skipped and unreadable folders when it finishes. Results are capped at 100,000 rows and a 32 MiB storage budget. Narrow the query when the result limit is reached.
 
-Select a match and press **Enter**, double-click it, or choose **Open folder in new tab**. The app opens a new tab on the source side and selects the file. The Find Files window hides after the jump. Press **Alt+F7** again to return to the results. **Close** ends any active search and clears its results.
+Select a match and press **F3** (or click **Quick View (F3)**) to preview it immediately without leaving Find Files, press **Shift+Alt+C** (or click **Copy path**) to copy its full path, click **Open opposite** to open its folder in the opposite pane, or press **Enter** / double-click / click **Open folder in new tab** to open a new tab on the source side with the file selected. The Find Files window hides after opening a folder tab. Press **Alt+F7** again to return to the results. **Close** ends any active search and clears its results.
 
 ## Compare folders
 
