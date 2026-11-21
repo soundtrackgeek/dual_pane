@@ -20,6 +20,7 @@ const DATE_FILTER: u16 = 631;
 const PREVIEW: u16 = 632;
 const COPY_PATH_BTN: u16 = 633;
 const OPEN_OPPOSITE: u16 = 634;
+const LEVELS: u16 = 635;
 const SEARCH: u16 = IDOK.0 as u16;
 const CLOSE: u16 = IDCANCEL.0 as u16;
 const MAX_RESULTS: usize = 100_000;
@@ -142,7 +143,7 @@ impl App {
         }
         match prompt::create_panel(
             self.window,
-            [495, 275],
+            [510, 275],
             WINDOW_STYLE(0),
             Some(panel_proc),
             LPARAM((self as *const App) as isize),
@@ -204,15 +205,25 @@ impl App {
             4 => Some(find::cutoff_filetime_days(365)),
             _ => None,
         };
+        let max_depth = match send(control(window, LEVELS), CB_GETCURSEL, 0, 0) {
+            1 => Some(1),
+            2 => Some(2),
+            3 => Some(3),
+            4 => Some(4),
+            5 => Some(5),
+            _ => None,
+        };
         let filter = Arc::new(SearchFilter {
             name,
             content,
             min_size,
             max_size,
             modified_after,
+            max_depth,
         });
         let active = self.active.get();
-        let both = send(control(window, SCOPE), CB_GETCURSEL, 0, 0) == 1;
+        let scope = send(control(window, SCOPE), CB_GETCURSEL, 0, 0);
+        let both = scope == 2;
         if self.panes[active].listing.borrow().archive.is_some()
             || (both && self.panes[1 - active].listing.borrow().archive.is_some())
         {
@@ -224,6 +235,32 @@ impl App {
             );
             return;
         }
+        let targets: Vec<(usize, Vec<PathBuf>)> = if both {
+            [active, 1 - active]
+                .into_iter()
+                .map(|pane| (pane, vec![self.panes[pane].listing.borrow().path.clone()]))
+                .collect()
+        } else if scope == 0 {
+            let pane = &self.panes[active];
+            let listing = pane.listing.borrow();
+            let selected_dirs: Vec<PathBuf> = pane
+                .selection()
+                .filter_map(|row| listing.rows.get(row))
+                .filter(|entry| entry.directory)
+                .map(|entry| listing.path.join(entry.filename()))
+                .collect();
+            let paths = if selected_dirs.is_empty() {
+                vec![listing.path.clone()]
+            } else {
+                selected_dirs
+            };
+            vec![(active, paths)]
+        } else {
+            vec![(
+                active,
+                vec![self.panes[active].listing.borrow().path.clone()],
+            )]
+        };
         let generation = self.find_files.generation.get().wrapping_add(1);
         self.find_files.generation.set(generation);
 
@@ -235,17 +272,17 @@ impl App {
             rows: Vec::new(),
             last_folder: Default::default(),
             bytes: 0,
-            pending: 1 + usize::from(both),
+            pending: targets.len(),
             report: Report::default(),
             status: "Searching…",
         }));
         send(control(window, RESULTS), LVM_SETITEMCOUNT, 0, 0);
 
-        for pane in [active, 1 - active].into_iter().take(1 + usize::from(both)) {
-            let path = self.panes[pane].listing.borrow().path.clone();
+        for (pane, paths) in targets {
+            let first = paths[0].clone();
             let worker = Worker {
                 pane,
-                path: path.clone(),
+                paths,
                 filter: filter.clone(),
                 stopped: stopped.clone(),
                 sender: sender.clone(),
@@ -266,7 +303,7 @@ impl App {
                     .unwrap()
                     .finish(Report {
                         unreadable: 1,
-                        first_error: Some(format!("{} · {error}", path.display())),
+                        first_error: Some(format!("{} · {error}", first.display())),
                         ..Report::default()
                     });
             }
@@ -384,7 +421,7 @@ impl App {
                 },
             );
         }
-        enable_open(window);
+        enable_open(self, window);
     }
 
     fn find_text(&self, item: &LVITEMW) {
@@ -396,7 +433,15 @@ impl App {
             match item.iSubItem {
                 0 => copy_text(item, &hit.name),
                 1 => copy_text(item, &wide(hit.folder.as_os_str())),
-                _ => copy_text(item, &wide(if hit.pane == 0 { "Left" } else { "Right" })),
+                _ => {
+                    let label = match (hit.pane, hit.directory) {
+                        (0, true) => "Left · Folder",
+                        (0, false) => "Left",
+                        (_, true) => "Right · Folder",
+                        (_, false) => "Right",
+                    };
+                    copy_text(item, &wide(label));
+                }
             }
         } else {
             copy_text(item, &[0]);
@@ -428,7 +473,7 @@ impl App {
                 let full_path = hit.folder.join(filename);
                 let entry = Entry {
                     name: hit.name.clone(),
-                    directory: false,
+                    directory: hit.directory,
                     size: hit.size,
                     modified: hit.modified,
                     attributes: 0,
@@ -438,7 +483,9 @@ impl App {
     }
 
     fn preview_find_hit(&self, window: HWND) {
-        if let Some((_, path, entry)) = self.selected_find_hit(window, None) {
+        if let Some((_, path, entry)) = self.selected_find_hit(window, None)
+            && !entry.directory
+        {
             self.show_quick_view_path(path, entry);
         }
     }
@@ -547,7 +594,7 @@ impl App {
 
 struct Worker {
     pane: usize,
-    path: PathBuf,
+    paths: Vec<PathBuf>,
     filter: Arc<SearchFilter>,
     stopped: Arc<AtomicBool>,
     sender: SyncSender<Update>,
@@ -562,7 +609,7 @@ impl Worker {
             .spawn(move || {
                 let _slot = slot;
                 let current = || !self.stopped.load(Ordering::Relaxed);
-                find::scan(self.path, self.pane, &self.filter, current, |update| {
+                let send = |update: Update| {
                     current()
                         && self.sender.send(update).is_ok()
                         && unsafe {
@@ -574,7 +621,37 @@ impl Worker {
                             )
                             .is_ok()
                         }
-                });
+                };
+                let mut combined = Report::default();
+                let mut ok = true;
+                for path in self.paths {
+                    if !current() || !ok {
+                        return;
+                    }
+                    find::scan(
+                        path,
+                        self.pane,
+                        &self.filter,
+                        current,
+                        |update| match update {
+                            Update::Hits(hits) => {
+                                ok = send(Update::Hits(hits));
+                                ok
+                            }
+                            Update::Finished(report) => {
+                                combined.unreadable += report.unreadable;
+                                combined.links += report.links;
+                                if combined.first_error.is_none() {
+                                    combined.first_error = report.first_error;
+                                }
+                                true
+                            }
+                        },
+                    );
+                }
+                if current() && ok {
+                    let _ = send(Update::Finished(combined));
+                }
             })?;
         Ok(())
     }
@@ -584,17 +661,29 @@ fn control(window: HWND, id: u16) -> HWND {
     unsafe { GetDlgItem(Some(window), id as i32) }.unwrap_or_default()
 }
 
-fn enable_open(window: HWND) {
-    let selected = send(
+fn enable_open(app: &App, window: HWND) {
+    let selected = usize::try_from(send(
         control(window, RESULTS),
         LVM_GETNEXTITEM,
         usize::MAX,
         LVNI_SELECTED as isize,
-    ) >= 0;
-    for id in [OPEN, OPEN_OPPOSITE, PREVIEW, COPY_PATH_BTN] {
+    ))
+    .ok();
+    let is_file = selected.is_some_and(|row| {
+        app.find_files
+            .session
+            .borrow()
+            .as_ref()
+            .and_then(|session| session.rows.get(row))
+            .is_some_and(|hit| !hit.directory)
+    });
+    for id in [OPEN, OPEN_OPPOSITE, COPY_PATH_BTN] {
         unsafe {
-            let _ = EnableWindow(control(window, id), selected);
+            let _ = EnableWindow(control(window, id), selected.is_some());
         }
+    }
+    unsafe {
+        let _ = EnableWindow(control(window, PREVIEW), is_file);
     }
 }
 
@@ -618,7 +707,7 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
     let controls = [
         (
             w!("Static"),
-            w!("File&name"),
+            w!("&Name"),
             normal,
             static_style,
             0,
@@ -646,7 +735,7 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
             normal,
             combo,
             SCOPE,
-            [323, 8, 486, 65],
+            [323, 8, 501, 80],
         ),
         (
             w!("Static"),
@@ -670,7 +759,23 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
             normal,
             check,
             MATCH_CASE,
-            [305, 31, 390, 44],
+            [305, 31, 382, 44],
+        ),
+        (
+            w!("Static"),
+            w!("&Levels"),
+            normal,
+            static_style,
+            0,
+            [388, 33, 416, 45],
+        ),
+        (
+            w!("ComboBox"),
+            w!(""),
+            normal,
+            combo,
+            LEVELS,
+            [420, 29, 501, 130],
         ),
         (
             w!("Static"),
@@ -710,7 +815,7 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
             normal,
             tab | WINDOW_STYLE(BS_DEFPUSHBUTTON as u32),
             SEARCH,
-            [364, 50, 422, 67],
+            [379, 50, 437, 67],
         ),
         (
             w!("Button"),
@@ -718,7 +823,7 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
             normal,
             tab,
             STOP,
-            [428, 50, 486, 67],
+            [443, 50, 501, 67],
         ),
         (
             WC_LISTVIEWW,
@@ -728,7 +833,7 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
                 LVS_REPORT | LVS_OWNERDATA | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER,
             ),
             RESULTS,
-            [9, 74, 486, 214],
+            [9, 74, 501, 214],
         ),
         (
             w!("Static"),
@@ -736,7 +841,7 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
             normal,
             static_style,
             SUMMARY,
-            [9, 220, 486, 232],
+            [9, 220, 501, 232],
         ),
         (
             w!("Edit"),
@@ -744,7 +849,7 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
             normal,
             tab | edit | WINDOW_STYLE(ES_READONLY as u32),
             WARNING,
-            [9, 234, 486, 247],
+            [9, 234, 501, 247],
         ),
         (
             w!("Button"),
@@ -776,7 +881,7 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
             normal,
             tab,
             OPEN,
-            [274, 251, 418, 268],
+            [274, 251, 433, 268],
         ),
         (
             w!("Button"),
@@ -784,7 +889,7 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
             normal,
             tab,
             CLOSE,
-            [424, 251, 486, 268],
+            [439, 251, 501, 268],
         ),
     ];
     for template in controls {
@@ -794,12 +899,25 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
     send(control(window, CONTENT), EM_SETLIMITTEXT, 255, 0);
     let scope = control(window, SCOPE);
     for label in [
-        w!("Active folder and subfolders"),
-        w!("Both folders and subfolders"),
+        w!("Selected folder(s) / active folder"),
+        w!("Active folder"),
+        w!("Both folders"),
     ] {
         send(scope, CB_ADDSTRING, 0, label.as_ptr() as isize);
     }
     send(scope, CB_SETCURSEL, 0, 0);
+    let levels = control(window, LEVELS);
+    for label in [
+        w!("All levels"),
+        w!("Level 1"),
+        w!("Level 2"),
+        w!("Level 3"),
+        w!("Level 4"),
+        w!("Level 5"),
+    ] {
+        send(levels, CB_ADDSTRING, 0, label.as_ptr() as isize);
+    }
+    send(levels, CB_SETCURSEL, 0, 0);
     let size_filter = control(window, SIZE_FILTER);
     for label in [
         w!("Any size"),
@@ -838,9 +956,9 @@ fn initialize(app: &App, window: HWND) -> Result<()> {
     }
     let width = bounds.right - app.scale(19);
     for (index, (name, percent)) in [
-        (w!("Filename"), 32),
-        (w!("Containing folder"), 58),
-        (w!("Pane"), 10),
+        (w!("Name"), 31),
+        (w!("Containing folder"), 53),
+        (w!("Pane"), 16),
     ]
     .into_iter()
     .enumerate()
@@ -908,7 +1026,7 @@ unsafe extern "system" fn panel_proc(
                     return 0;
                 }
                 match header.code {
-                    LVN_ITEMCHANGED | LVN_ODSTATECHANGED => enable_open(window),
+                    LVN_ITEMCHANGED | LVN_ODSTATECHANGED => enable_open(app, window),
                     LVN_GETDISPINFOW => {
                         let data = &*(lparam.0 as *const NMLVDISPINFOW);
                         if data.item.mask.contains(LVIF_TEXT) {

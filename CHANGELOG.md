@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.0-rc.17] - 2026-11-21
+
+### Added
+
+- **Find Files (`Alt+F7`)** now matches folders as well as files (when content and size filters are inactive), labeling folder matches in the results list.
+- Added **Selected folder(s) / active folder** as the default **In** scope so selecting a folder in the active pane and pressing `Alt+F7` searches inside that selected folder directly.
+- Added a **Levels** depth selector (`All levels`, `Level 1` through `Level 5`) to limit how many subfolder levels are searched.
+
 ## [1.0.0-rc.16] - 2026-11-21
 
 ### Added

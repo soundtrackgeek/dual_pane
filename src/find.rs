@@ -233,6 +233,7 @@ pub struct SearchFilter {
     pub min_size: Option<u64>,
     pub max_size: Option<u64>,
     pub modified_after: Option<u64>,
+    pub max_depth: Option<usize>,
 }
 
 pub fn cutoff_filetime_days(days: u64) -> u64 {
@@ -245,6 +246,7 @@ pub struct Hit {
     pub folder: Arc<PathBuf>,
     pub name: Box<[u16]>,
     pub pane: usize,
+    pub directory: bool,
     pub size: u64,
     pub modified: FILETIME,
 }
@@ -329,7 +331,9 @@ pub fn scan(
     };
     let mut batch = Vec::new();
     let mut last_update = None::<Instant>;
-    while let Some(frame) = stack.last_mut() {
+    while !stack.is_empty() {
+        let depth = stack.len();
+        let frame = stack.last_mut().unwrap();
         if !current() {
             return;
         }
@@ -350,8 +354,34 @@ pub fn scan(
                     return;
                 }
                 if attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
+                    let include_folders = filter.content.is_none()
+                        && filter.min_size.is_none()
+                        && filter.max_size.is_none();
+                    if include_folders
+                        && filter.name.as_ref().is_none_or(|query| query.matches(bare))
+                    {
+                        let matches_date = filter.modified_after.is_none_or(|cutoff| {
+                            let modified = (u64::from(data.ftLastWriteTime.dwHighDateTime) << 32)
+                                | u64::from(data.ftLastWriteTime.dwLowDateTime);
+                            modified >= cutoff
+                        });
+                        if matches_date {
+                            let folder = frame.folder.get_or_insert_with(|| Arc::new(path.clone()));
+                            batch.push(Hit {
+                                folder: folder.clone(),
+                                name: Box::from(name),
+                                pane,
+                                directory: true,
+                                size: 0,
+                                modified: data.ftLastWriteTime,
+                            });
+                        }
+                    }
                     if attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
                         report.links += 1;
+                        continue;
+                    }
+                    if filter.max_depth.is_some_and(|max| depth >= max) {
                         continue;
                     }
                     path.push(OsString::from_wide(bare));
@@ -397,6 +427,7 @@ pub fn scan(
                         folder: folder.clone(),
                         name: Box::from(name),
                         pane,
+                        directory: false,
                         size,
                         modified: data.ftLastWriteTime,
                     });
@@ -482,6 +513,7 @@ mod tests {
             min_size: Some(1024),
             max_size: None,
             modified_after: None,
+            max_depth: None,
         };
         let mut hits = Vec::new();
         scan(
@@ -500,6 +532,71 @@ mod tests {
         assert_eq!(
             OsString::from_wide(&hits[0].name[..hits[0].name.len() - 1]),
             "large.txt"
+        );
+    }
+
+    #[test]
+    fn scan_finds_folders_and_respects_depth_levels() {
+        let dir = tempfile::tempdir().unwrap();
+        let l1_dir = dir.path().join("alpha_dir");
+        let l2_dir = l1_dir.join("alpha_sub");
+        let l3_dir = l2_dir.join("alpha_deep");
+        std::fs::create_dir_all(&l3_dir).unwrap();
+        std::fs::write(dir.path().join("alpha_1.txt"), b"1").unwrap();
+        std::fs::write(l1_dir.join("alpha_2.txt"), b"2").unwrap();
+        std::fs::write(l2_dir.join("alpha_3.txt"), b"3").unwrap();
+
+        let run = |max_depth| {
+            let filter = SearchFilter {
+                name: Some(Query::new("alpha".encode_utf16().collect())),
+                max_depth,
+                ..SearchFilter::default()
+            };
+            let mut names = Vec::new();
+            scan(
+                dir.path().to_path_buf(),
+                0,
+                &filter,
+                || true,
+                |update| {
+                    if let Update::Hits(batch) = update {
+                        for hit in batch {
+                            let name = OsString::from_wide(&hit.name[..hit.name.len() - 1])
+                                .to_string_lossy()
+                                .into_owned();
+                            names.push((name, hit.directory));
+                        }
+                    }
+                    true
+                },
+            );
+            names.sort();
+            names
+        };
+
+        assert_eq!(
+            run(Some(1)),
+            vec![("alpha_1.txt".into(), false), ("alpha_dir".into(), true)]
+        );
+        assert_eq!(
+            run(Some(2)),
+            vec![
+                ("alpha_1.txt".into(), false),
+                ("alpha_2.txt".into(), false),
+                ("alpha_dir".into(), true),
+                ("alpha_sub".into(), true),
+            ]
+        );
+        assert_eq!(
+            run(None),
+            vec![
+                ("alpha_1.txt".into(), false),
+                ("alpha_2.txt".into(), false),
+                ("alpha_3.txt".into(), false),
+                ("alpha_deep".into(), true),
+                ("alpha_dir".into(), true),
+                ("alpha_sub".into(), true),
+            ]
         );
     }
 }
