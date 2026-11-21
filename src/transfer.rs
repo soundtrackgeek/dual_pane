@@ -353,6 +353,30 @@ impl Report {
 pub struct Progress {
     pub percent: Option<u32>,
     pub complete: usize,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    pub eta_seconds: Option<u64>,
+}
+
+fn streaming_progress(complete: usize, bytes: u128, total: u128, elapsed: Duration) -> Progress {
+    let percent = (total > 0).then(|| (bytes * 100 / total).min(99) as u32);
+    let eta_seconds = if total > bytes && bytes > 0 && elapsed >= Duration::from_secs(1) {
+        let rate = bytes as f64 / elapsed.as_secs_f64();
+        if rate > 0.0 {
+            Some(((total - bytes) as f64 / rate).ceil() as u64)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    Progress {
+        percent,
+        complete,
+        bytes_done: bytes.min(u128::from(u64::MAX)) as u64,
+        bytes_total: total.min(u128::from(u64::MAX)) as u64,
+        eta_seconds,
+    }
 }
 
 pub struct ProgressUpdate {
@@ -742,13 +766,11 @@ fn run_extract(
     let total = extractor.total;
     let mut bytes = 0_u128;
     let mut complete = 0;
-    let mut last = Instant::now();
+    let started = Instant::now();
+    let mut last = started;
     let mut changed = Vec::new();
     send(ProgressUpdate {
-        summary: Progress {
-            complete,
-            percent: Some(0),
-        },
+        summary: streaming_progress(complete, bytes, total, Duration::ZERO),
         items: Vec::new(),
     });
     for (index, file) in request.files.iter().enumerate() {
@@ -759,9 +781,8 @@ fn run_extract(
         let result = extractor.item(index, &file.name, current, |count| {
             bytes += count as u128;
             if last.elapsed() >= Duration::from_millis(100) {
-                let percent = (total > 0).then(|| (bytes * 100 / total).min(99) as u32);
                 send(ProgressUpdate {
-                    summary: Progress { complete, percent },
+                    summary: streaming_progress(complete, bytes, total, started.elapsed()),
                     items: std::mem::take(&mut changed),
                 });
                 last = Instant::now();
@@ -794,9 +815,8 @@ fn run_extract(
         };
         changed.push((index, state));
         if last.elapsed() >= Duration::from_millis(100) || index + 1 == request.files.len() {
-            let percent = (total > 0).then(|| (bytes * 100 / total).min(99) as u32);
             send(ProgressUpdate {
-                summary: Progress { complete, percent },
+                summary: streaming_progress(complete, bytes, total, started.elapsed()),
                 items: std::mem::take(&mut changed),
             });
             last = Instant::now();
@@ -859,13 +879,11 @@ fn run_pack(
     let total = packer.total;
     let mut bytes = 0_u128;
     let mut complete = 0;
-    let mut last = Instant::now();
+    let started = Instant::now();
+    let mut last = started;
     let mut changed = Vec::new();
     send(ProgressUpdate {
-        summary: Progress {
-            complete,
-            percent: Some(0),
-        },
+        summary: streaming_progress(complete, bytes, total, Duration::ZERO),
         items: Vec::new(),
     });
     for index in 0..request.files.len() {
@@ -876,9 +894,8 @@ fn run_pack(
         let result = packer.item(index, current, |count| {
             bytes += count as u128;
             if last.elapsed() >= Duration::from_millis(100) {
-                let percent = (total > 0).then(|| (bytes * 100 / total).min(99) as u32);
                 send(ProgressUpdate {
-                    summary: Progress { complete, percent },
+                    summary: streaming_progress(complete, bytes, total, started.elapsed()),
                     items: std::mem::take(&mut changed),
                 });
                 last = Instant::now();
@@ -908,9 +925,8 @@ fn run_pack(
         };
         changed.push((index, state));
         if last.elapsed() >= Duration::from_millis(100) || index + 1 == request.files.len() {
-            let percent = (total > 0).then(|| (bytes * 100 / total).min(99) as u32);
             send(ProgressUpdate {
-                summary: Progress { complete, percent },
+                summary: streaming_progress(complete, bytes, total, started.elapsed()),
                 items: std::mem::take(&mut changed),
             });
             last = Instant::now();

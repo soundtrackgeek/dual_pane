@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.11] - 2026-11-21
+
+### Changed
+
+- Packing to ZIP and extracting from ZIP now automatically open the **Transfers** panel so the live progress bar, bytes processed, percentage, and estimated time remaining are immediately visible (and the main window footer also displays live percentage and ETA).
+- Marked temporary ZIP staging folders with `FILE_ATTRIBUTE_HIDDEN` so they stay out of the way in the destination pane while packing or extracting.
+
 ## [1.0.0-rc.10] - 2026-11-21
 
 ### Added

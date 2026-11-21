@@ -15,8 +15,9 @@ use windows::{
     Win32::{
         Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, FILETIME, SYSTEMTIME},
         Storage::FileSystem::{
-            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-            FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, MOVE_FILE_FLAGS, MoveFileExW,
+            FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            MOVE_FILE_FLAGS, MoveFileExW, SetFileAttributesW,
         },
         System::Time::{SystemTimeToFileTime, TzSpecificLocalTimeToSystemTime},
     },
@@ -723,6 +724,10 @@ impl Stage {
             let path = root.join(format!(".dual-pane-extract-{}-{id}", std::process::id()));
             match fs::create_dir(&path) {
                 Ok(()) => {
+                    let hidden = extended_path(&path);
+                    unsafe {
+                        let _ = SetFileAttributesW(PCWSTR(hidden.as_ptr()), FILE_ATTRIBUTE_HIDDEN);
+                    }
                     let mut stage = Self { path, lock: None };
                     stage.lock = Some(lock_directory(&stage.path)?);
                     return Ok(stage);

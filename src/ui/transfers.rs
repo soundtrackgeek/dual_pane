@@ -279,10 +279,18 @@ impl App {
             if job.phase == Phase::Stopping {
                 Some(format!("Cancel requested · {waiting} waiting"))
             } else {
-                Some(format!(
-                    "{} running · {waiting} waiting",
-                    job.request.action.verb()
-                ))
+                let mut text = if let Some(pct) = job.progress.percent {
+                    format!("{} {pct}%", job.request.action.verb())
+                } else {
+                    format!("{} running", job.request.action.verb())
+                };
+                if let Some(eta) = job.progress.eta_seconds {
+                    text.push_str(&format!(" · {}", format_eta(eta)));
+                }
+                if waiting > 0 {
+                    text.push_str(&format!(" · {waiting} waiting"));
+                }
+                Some(text)
             }
         } else if waiting != 0 {
             Some(format!(
@@ -524,6 +532,20 @@ impl App {
                 } else {
                     job.status().to_owned()
                 }
+            } else if matches!(job.request.action, Transfer::Extract | Transfer::Pack)
+                && job.progress.bytes_total > 0
+            {
+                let pct = job.progress.percent.unwrap_or(0);
+                let mut line = format!(
+                    "{} · {} of {} ({pct}%)",
+                    job.status(),
+                    format_bytes(job.progress.bytes_done),
+                    format_bytes(job.progress.bytes_total),
+                );
+                if let Some(eta) = job.progress.eta_seconds {
+                    line.push_str(&format!(" · {}", format_eta(eta)));
+                }
+                line
             } else {
                 let progress = job.progress.percent.map_or_else(String::new, |pct| {
                     if matches!(job.request.action, Transfer::Extract | Transfer::Pack) {
@@ -985,9 +1007,46 @@ unsafe extern "system" fn panel_proc(
     0
 }
 
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let value = bytes as f64;
+    if value >= GIB {
+        format!("{:.2} GiB", value / GIB)
+    } else if value >= MIB {
+        format!("{:.1} MiB", value / MIB)
+    } else if value >= KIB {
+        format!("{:.0} KiB", value / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn format_eta(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("~{seconds}s left")
+    } else if seconds < 3600 {
+        format!("~{}m {:02}s left", seconds / 60, seconds % 60)
+    } else {
+        format!("~{}h {:02}m left", seconds / 3600, (seconds % 3600) / 60)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formats_transfer_bytes_and_eta_for_progress_display() {
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(15 * 1024), "15 KiB");
+        assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MiB");
+        assert_eq!(format_bytes(2 * 1024 * 1024 * 1024), "2.00 GiB");
+        assert_eq!(format_eta(8), "~8s left");
+        assert_eq!(format_eta(125), "~2m 05s left");
+        assert_eq!(format_eta(3665), "~1h 01m left");
+    }
 
     #[test]
     fn pauses_between_fifo_jobs() {

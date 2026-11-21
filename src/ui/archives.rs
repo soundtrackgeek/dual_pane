@@ -234,6 +234,7 @@ impl App {
                 files,
                 source,
             ));
+            self.show_transfers();
         }
         self.focus_list(index);
     }
@@ -290,6 +291,7 @@ impl App {
                 files,
                 archive_name,
             ));
+            self.show_transfers();
         }
     }
 }
