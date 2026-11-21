@@ -66,6 +66,7 @@ Click a drive button above a pane’s path field to open that drive’s root in 
 | Ctrl+M | Review a batch rename for the selected files |
 | F3 | Preview the focused file in Quick View |
 | F5 / F6 | Queue a confirmed copy / move to the opposite pane. F5 extracts from a ZIP. |
+| Alt+F5 | Pack the selected disk files and folders into a new ZIP archive |
 | F7 | Create a folder in the active pane |
 | Delete | Confirm sending the selection to the Recycle Bin |
 | Shift+Alt+C | Copy the full path(s) of the selected items or active folder to the clipboard |
@@ -104,7 +105,9 @@ Paste and drop capture the destination and queue the work in **Transfers**. Wind
 
 Focus a `.zip` file and press **Enter** or double-click it to browse the archive in that pane. Open its subfolders, sort the list, or use **Ctrl+F** to filter the current ZIP folder. **Backspace** goes up one level and leaves the ZIP at its root. **Alt+Left** and **Alt+Right** work with ZIP locations, and saved tabs can reopen a ZIP folder. Use **Ctrl+R** to reread an archive that changed.
 
-Select members and press **F5** to confirm extraction to the disk folder in the opposite pane. A selected folder includes its descendants. Follow the job in **Transfers**. Existing names are skipped, including destination folders. A member is published only after it has been written and checked. If you cancel, completed items remain in place and the current partial item is discarded.
+Select members and press **F5** to confirm extraction to the disk folder in the opposite pane. A selected folder includes its descendants. Follow the job in **Transfers**. Existing names are skipped, including destination folders. A member is published only after it has been written and checked. If you cancel, completed items remain in place and the current partial item is discarded. You can also press **F3** on any file inside a ZIP to preview text or images in Quick View without extracting.
+
+Select disk files or folders and press **Alt+F5** (or choose **Pack to ZIP…** from the View or context menu) to create a new Deflate-compressed `.zip` archive in the opposite pane (or the active pane if the opposite pane is unavailable). Packing streams through **Transfers** with progress, cancellation, ZIP64 support for files over 4 GiB, reparse-point skipping, and atomic no-overwrite publishing.
 
 Browsing and extraction support read-only ZIP and ZIP64. Extraction supports stored and Deflate members. Password-protected and unsupported compression methods show an error in the job results. Entries with invalid Windows names, paths outside the archive folder, or links are omitted and counted in the pane. The archive is rechecked when a queued job starts.
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.10] - 2026-11-21
+
+### Added
+
+- Added **Pack to ZIP…** (`Alt+F5`, View menu, and item context menu) to compress selected disk files and folders into a `.zip` archive through the Transfers queue with streamed Deflate writes, ZIP64 support, progress, cancellation, and atomic no-overwrite publishing.
+- Added **Quick View (`F3`) inside ZIP archives**, streaming bounded text (up to 128 KiB) and image (up to 24 MiB) previews directly from archive members without extracting to disk.
+
 ## [1.0.0-rc.9] - 2026-11-21
 
 ### Added

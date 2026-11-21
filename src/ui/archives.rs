@@ -237,4 +237,108 @@ impl App {
         }
         self.focus_list(index);
     }
+
+    pub fn pack_selection(&self) {
+        let index = self.active.get();
+        let pane = &self.panes[index];
+        if !self.can_queue_transfer() {
+            return;
+        }
+        let (folder, files) = {
+            let listing = pane.listing.borrow();
+            if !listing.disk_ready() {
+                return;
+            }
+            let files = pane
+                .selection()
+                .filter_map(|row| listing.rows.get(row))
+                .map(crate::transfer::Requested::selected)
+                .collect::<Vec<_>>();
+            (listing.path.clone(), files)
+        };
+        if files.is_empty() {
+            return;
+        }
+        let destination = {
+            let target = self.panes[1 - index].listing.borrow();
+            if target.disk_ready() {
+                target.path.clone()
+            } else {
+                folder.clone()
+            }
+        };
+        let default_name = default_zip_name(&folder, &files);
+        let stem_len = default_name
+            .to_string_lossy()
+            .strip_suffix(".zip")
+            .map_or_else(
+                || default_name.encode_wide().count(),
+                |stem| stem.encode_utf16().count(),
+            );
+        let name = prompt::name(
+            self.window,
+            self.font.get(),
+            w!("Pack to ZIP"),
+            &default_name,
+            stem_len,
+        );
+        self.focus_list(index);
+        if let Some(name) = name {
+            let archive_name = ensure_zip_extension(name);
+            self.enqueue_transfer(crate::transfer::Request::pack(
+                [folder, destination],
+                files,
+                archive_name,
+            ));
+        }
+    }
+}
+
+fn default_zip_name(folder: &Path, files: &[crate::transfer::Requested]) -> OsString {
+    if files.len() == 1 {
+        let stem = Path::new(&files[0].name)
+            .file_stem()
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or(&files[0].name);
+        let mut name = stem.to_os_string();
+        name.push(".zip");
+        name
+    } else if let Some(folder_name) = folder.file_name().filter(|name| !name.is_empty()) {
+        let mut name = folder_name.to_os_string();
+        name.push(".zip");
+        name
+    } else {
+        OsString::from("archive.zip")
+    }
+}
+
+fn ensure_zip_extension(mut name: OsString) -> OsString {
+    if !Path::new(&name)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+    {
+        name.push(".zip");
+    }
+    name
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builds_default_zip_names_and_appends_extension() {
+        assert_eq!(
+            ensure_zip_extension(OsString::from("backup")),
+            OsString::from("backup.zip")
+        );
+        assert_eq!(
+            ensure_zip_extension(OsString::from("backup.ZIP")),
+            OsString::from("backup.ZIP")
+        );
+        assert_eq!(
+            default_zip_name(Path::new(r"C:\"), &[]),
+            OsString::from("archive.zip")
+        );
+    }
 }

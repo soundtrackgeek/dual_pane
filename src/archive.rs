@@ -1,8 +1,8 @@
 use std::{
     collections::{HashMap, HashSet},
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
-    io::{self, BufReader, Read, Write},
+    io::{self, BufReader, BufWriter, Read, Write},
     os::windows::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::{
@@ -22,7 +22,7 @@ use windows::{
     },
     core::PCWSTR,
 };
-use zip::{ZipArchive, read::ZipFileEntry};
+use zip::{CompressionMethod, ZipArchive, ZipWriter, read::ZipFileEntry, write::SimpleFileOptions};
 
 use crate::{
     compare::{self, Identity, Stamp},
@@ -209,6 +209,240 @@ pub fn index(path: &Path, check: impl Fn() -> bool) -> io::Result<Index> {
         omitted,
         fingerprint,
     })
+}
+
+pub fn read_member(
+    path: &Path,
+    member: &str,
+    limit: usize,
+    check: &impl Fn() -> bool,
+) -> io::Result<(Vec<u8>, u64)> {
+    let (mut archive, _) = open(path, check)?;
+    let mut entry = archive.by_name(member).map_err(io::Error::other)?;
+    if entry.is_dir()
+        || entry.is_symlink()
+        || entry.external_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+    {
+        return Err(io::Error::other("This ZIP entry cannot be previewed."));
+    }
+    let size = entry.size();
+    let mut bytes = Vec::with_capacity(limit.min(size as usize));
+    let mut buffer = [0_u8; 32 * 1024];
+    while bytes.len() < limit {
+        current(check)?;
+        let wanted = (limit - bytes.len()).min(buffer.len());
+        match entry.read(&mut buffer[..wanted]) {
+            Ok(0) => break,
+            Ok(count) => bytes.extend_from_slice(&buffer[..count]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok((bytes, size))
+}
+
+struct PackEntry {
+    source: PathBuf,
+    archive_name: String,
+    directory: bool,
+    size: u64,
+}
+
+pub struct Packer {
+    writer: Option<ZipWriter<BufWriter<File>>>,
+    stage: Stage,
+    _root: File,
+    staged_file: PathBuf,
+    target: PathBuf,
+    groups: Vec<Vec<PackEntry>>,
+    buffer: Vec<u8>,
+    pub total: u128,
+}
+
+impl Packer {
+    pub fn prepare(
+        source_dir: &Path,
+        destination_dir: &Path,
+        archive_name: &OsStr,
+        names: &[OsString],
+        check: impl Fn() -> bool,
+    ) -> io::Result<Self> {
+        current(&check)?;
+        let root = lock_directory(destination_dir)?;
+        let destination = fs::canonicalize(destination_dir)?;
+        if compare::directory_identity(&destination)? != compare::directory_handle_identity(&root)?
+        {
+            return Err(io::Error::other("The destination folder changed."));
+        }
+        let target = destination.join(archive_name);
+        match fs::symlink_metadata(&target) {
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "The destination archive already exists.",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+
+        let mut groups = Vec::with_capacity(names.len());
+        let mut total = 0_u128;
+        for name in names {
+            current(&check)?;
+            let mut entries = Vec::new();
+            let full = source_dir.join(name);
+            let top = name
+                .to_str()
+                .ok_or_else(|| io::Error::other("An item name is not valid UTF-8 for ZIP."))?;
+            collect_pack_entries(&full, top, &mut entries, &mut total, &check)?;
+            groups.push(entries);
+        }
+
+        let stage = Stage::create(&destination)?;
+        let staged_file = stage.path.join("archive.zip");
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged_file)?;
+        let writer = ZipWriter::new(BufWriter::with_capacity(256 * 1024, file));
+        Ok(Self {
+            writer: Some(writer),
+            stage,
+            _root: root,
+            staged_file,
+            target,
+            groups,
+            buffer: vec![0; 256 * 1024],
+            total,
+        })
+    }
+
+    pub fn item(
+        &mut self,
+        index: usize,
+        check: impl Fn() -> bool,
+        mut progress: impl FnMut(usize),
+    ) -> io::Result<()> {
+        current(&check)?;
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| io::Error::other("The archive writer is already closed."))?;
+        for entry in &self.groups[index] {
+            current(&check)?;
+            if entry.directory {
+                let options =
+                    SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+                writer
+                    .add_directory(&entry.archive_name, options)
+                    .map_err(io::Error::other)?;
+                continue;
+            }
+            let options = SimpleFileOptions::default()
+                .compression_method(CompressionMethod::Deflated)
+                .large_file(entry.size > u32::MAX as u64);
+            writer
+                .start_file(&entry.archive_name, options)
+                .map_err(io::Error::other)?;
+            let mut input = OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+                .open(&entry.source)?;
+            loop {
+                current(&check)?;
+                let count = input.read(&mut self.buffer)?;
+                if count == 0 {
+                    break;
+                }
+                writer.write_all(&self.buffer[..count])?;
+                progress(count);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn finish(mut self, check: impl Fn() -> bool) -> io::Result<()> {
+        current(&check)?;
+        if let Some(writer) = self.writer.take() {
+            let mut file = writer.finish().map_err(io::Error::other)?;
+            file.flush()?;
+        }
+        current(&check)?;
+        let from = extended_path(&self.staged_file);
+        let to = extended_path(&self.target);
+        unsafe {
+            MoveFileExW(
+                PCWSTR(from.as_ptr()),
+                PCWSTR(to.as_ptr()),
+                MOVE_FILE_FLAGS(0),
+            )
+        }
+        .map_err(|error| {
+            if error.code() == ERROR_ALREADY_EXISTS.to_hresult()
+                || error.code() == ERROR_FILE_EXISTS.to_hresult()
+            {
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "The destination archive already exists.",
+                )
+            } else {
+                io::Error::other(error)
+            }
+        })?;
+        drop(self.stage);
+        Ok(())
+    }
+}
+
+fn collect_pack_entries(
+    path: &Path,
+    relative: &str,
+    out: &mut Vec<PackEntry>,
+    total: &mut u128,
+    check: &impl Fn() -> bool,
+) -> io::Result<()> {
+    current(check)?;
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        let mut children = Vec::new();
+        for entry in fs::read_dir(path)? {
+            current(check)?;
+            let entry = entry?;
+            children.push(entry.file_name());
+        }
+        if children.is_empty() {
+            out.push(PackEntry {
+                source: path.to_path_buf(),
+                archive_name: format!("{relative}/"),
+                directory: true,
+                size: 0,
+            });
+            return Ok(());
+        }
+        children.sort();
+        for child in children {
+            let Some(child_str) = child.to_str() else {
+                return Err(io::Error::other("A file name is not valid UTF-8 for ZIP."));
+            };
+            let next_rel = format!("{relative}/{child_str}");
+            collect_pack_entries(&path.join(&child), &next_rel, out, total, check)?;
+        }
+    } else if metadata.is_file() {
+        let size = metadata.len();
+        *total += u128::from(size);
+        out.push(PackEntry {
+            source: path.to_path_buf(),
+            archive_name: relative.to_owned(),
+            directory: false,
+            size,
+        });
+    }
+    Ok(())
 }
 
 struct Member {
@@ -514,7 +748,56 @@ impl Drop for Stage {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use zip::{ZipWriter, write::SimpleFileOptions};
+
+    #[test]
+    fn packs_files_and_folders_and_reads_bounded_member_preview() -> io::Result<()> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "filehelm-pack-test-{}-{unique}",
+            std::process::id()
+        ));
+        let source = root.join("src");
+        let dest = root.join("dst");
+        fs::create_dir_all(source.join("nested"))?;
+        fs::create_dir_all(source.join("empty_dir"))?;
+        fs::create_dir_all(&dest)?;
+        fs::write(source.join("hello.txt"), b"Hello from Filehelm ZIP!")?;
+        fs::write(source.join("nested").join("data.txt"), b"0123456789abcdef")?;
+
+        let names = vec![
+            OsString::from("hello.txt"),
+            OsString::from("nested"),
+            OsString::from("empty_dir"),
+        ];
+        let mut packer =
+            Packer::prepare(&source, &dest, OsStr::new("bundle.zip"), &names, || true)?;
+        let mut progress = 0_usize;
+        for i in 0..names.len() {
+            packer.item(i, || true, |n| progress += n)?;
+        }
+        assert_eq!(progress as u128, packer.total);
+        packer.finish(|| true)?;
+
+        let archive = dest.join("bundle.zip");
+        let idx = index(&archive, || true)?;
+        assert_eq!(idx.omitted, 0);
+        assert!(idx.entries("").unwrap().len() == 3);
+        assert!(idx.entries("nested").unwrap().len() == 1);
+        assert!(idx.entries("empty_dir").unwrap().is_empty());
+
+        let (head, total) = read_member(&archive, "nested/data.txt", 6, &|| true)?;
+        assert_eq!(head, b"012345");
+        assert_eq!(total, 16);
+
+        let existing = Packer::prepare(&source, &dest, OsStr::new("bundle.zip"), &names, || true);
+        assert!(matches!(existing, Err(error) if error.kind() == io::ErrorKind::AlreadyExists));
+
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
 
     #[test]
     fn extraction_omits_unsafe_names_and_protects_existing_targets() -> io::Result<()> {

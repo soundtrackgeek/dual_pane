@@ -21,12 +21,14 @@ struct Item {
     location: usize,
     row: usize,
     path: PathBuf,
+    archive_member: Option<String>,
     entry: Entry,
 }
 
 struct Request {
     id: usize,
     path: PathBuf,
+    archive_member: Option<String>,
     current: Arc<AtomicBool>,
 }
 
@@ -55,15 +57,31 @@ impl QuickView {
 impl App {
     fn preview_item(&self, pane: usize, row: usize) -> Option<Item> {
         let listing = self.panes[pane].listing.borrow();
-        if listing.projecting || listing.archive.is_some() {
+        if listing.projecting {
             return None;
         }
         let entry = listing.rows.get(row)?;
-        (!entry.directory).then(|| Item {
+        if entry.directory {
+            return None;
+        }
+        let filename = entry.filename();
+        let (path, archive_member) = if let Some(folder) = &listing.archive {
+            let name = filename.to_str()?;
+            let member = if folder.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{folder}/{name}")
+            };
+            (listing.path.clone(), Some(member))
+        } else {
+            (listing.path.join(filename), None)
+        };
+        Some(Item {
             pane,
             location: listing.location,
             row,
-            path: listing.path.join(entry.filename()),
+            path,
+            archive_member,
             entry: entry.clone(),
         })
     }
@@ -129,10 +147,19 @@ impl App {
         let request = Request {
             id,
             path: item.path.clone(),
+            archive_member: item.archive_member.clone(),
             current: current.clone(),
         };
         viewer.current.replace(Some(current));
         viewer.pending.replace(Some(request));
+        let in_archive = item.archive_member.is_some();
+        unsafe {
+            let open = control(panel, OPEN);
+            if in_archive && GetFocus() == open {
+                let _ = SetFocus(Some(control(panel, CLOSE)));
+            }
+            let _ = EnableWindow(open, !in_archive);
+        }
         set_text(control(panel, NAME), item.entry.filename());
         let modified = item.entry.detail(2);
         let size = format!("{} bytes", grouped(item.entry.size));
@@ -164,8 +191,11 @@ impl App {
         match thread::Builder::new()
             .name("quick-view".into())
             .spawn(move || {
-                let preview =
-                    preview::load(&request.path, || request.current.load(Ordering::Relaxed));
+                let check = || request.current.load(Ordering::Relaxed);
+                let preview = match &request.archive_member {
+                    Some(member) => preview::load_archive(&request.path, member, check),
+                    None => preview::load(&request.path, check),
+                };
                 if sender
                     .send(Event::PreviewFinished(request.id, preview))
                     .is_ok()
@@ -290,6 +320,7 @@ impl App {
             .item
             .borrow()
             .as_ref()
+            .filter(|item| item.archive_member.is_none())
             .map(|item| item.path.clone());
         if let Some(path) = path
             && let Err(error) = shell::open(panel, &path)

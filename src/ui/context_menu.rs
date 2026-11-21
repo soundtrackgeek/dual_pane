@@ -222,7 +222,9 @@ impl App {
             if in_archive {
                 if on_item && selected > 0 {
                     let can_open = focused_item.as_ref().is_some_and(|(_, dir)| *dir);
+                    let can_quick_view = focused_item.as_ref().is_some_and(|(_, dir)| !*dir);
                     append_item(menu, OPEN_ITEM, w!("&Open\tEnter"), can_open);
+                    append_item(menu, QUICK_VIEW, w!("&Quick View…\tF3"), can_quick_view);
                     append_item(menu, COPY, w!("E&xtract to opposite pane\tF5"), can_extract);
                     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
                 }
@@ -243,6 +245,12 @@ impl App {
                 let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
                 append_item(menu, COPY, w!("Cop&y to opposite pane\tF5"), can_transfer);
                 append_item(menu, MOVE, w!("&Move to opposite pane\tF6"), can_transfer);
+                append_item(
+                    menu,
+                    PACK_ZIP,
+                    w!("Pack to &ZIP…\tAlt+F5"),
+                    disk_ready && self.can_queue_transfer(),
+                );
                 let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
                 append_item(menu, CLIP_CUT, w!("Cu&t\tCtrl+X"), disk_ready);
                 append_item(menu, CLIP_COPY, w!("&Copy\tCtrl+C"), disk_ready);

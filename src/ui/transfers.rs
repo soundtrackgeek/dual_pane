@@ -526,7 +526,7 @@ impl App {
                 }
             } else {
                 let progress = job.progress.percent.map_or_else(String::new, |pct| {
-                    if matches!(job.request.action, Transfer::Extract) {
+                    if matches!(job.request.action, Transfer::Extract | Transfer::Pack) {
                         format!(" · Streaming {pct}%")
                     } else {
                         format!(" · Windows estimate {pct}%")

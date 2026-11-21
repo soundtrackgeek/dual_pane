@@ -38,6 +38,7 @@ enum Policy {
     Reviewed([Identity; 2]),
     Retry([Identity; 2]),
     Extract(archive::Source),
+    Pack(OsString),
     Incoming { clipboard: Option<u32>, mixed: bool },
 }
 
@@ -151,6 +152,15 @@ impl Request {
         }
     }
 
+    pub fn pack(paths: [PathBuf; 2], files: Vec<Requested>, archive_name: OsString) -> Self {
+        Self {
+            action: Transfer::Pack,
+            paths,
+            files,
+            policy: Policy::Pack(archive_name),
+        }
+    }
+
     pub fn zip_folder(&self) -> Option<Arc<str>> {
         if let Policy::Extract(source) = &self.policy {
             Some(source.folder.clone())
@@ -244,6 +254,7 @@ pub enum ItemState {
     Copied,
     Moved,
     Extracted,
+    Packed,
     Skipped,
     Failed,
     Canceled,
@@ -258,6 +269,7 @@ impl ItemState {
             Self::Copied => "Copied",
             Self::Moved => "Moved",
             Self::Extracted => "Extracted",
+            Self::Packed => "Packed",
             Self::Skipped => "Skipped",
             Self::Failed => "Failed",
             Self::Canceled => "Canceled",
@@ -267,7 +279,10 @@ impl ItemState {
     }
 
     pub fn completed(self) -> bool {
-        matches!(self, Self::Copied | Self::Moved | Self::Extracted)
+        matches!(
+            self,
+            Self::Copied | Self::Moved | Self::Extracted | Self::Packed
+        )
     }
 }
 
@@ -476,6 +491,7 @@ fn classify(action: Transfer, code: HRESULT, destination: bool) -> ItemState {
             Transfer::Copy => ItemState::Copied,
             Transfer::Move => ItemState::Moved,
             Transfer::Extract => ItemState::Extracted,
+            Transfer::Pack => ItemState::Packed,
         }
     } else if code.is_err() {
         ItemState::Failed
@@ -640,6 +656,9 @@ pub fn run(
 ) -> Report {
     if let Policy::Extract(source) = &request.policy {
         return run_extract(request, source, &cancel, send);
+    }
+    if let Policy::Pack(archive_name) = &request.policy {
+        return run_pack(request, archive_name, &cancel, send);
     }
     let tracker = Arc::new(Mutex::new(Tracker {
         action: request.action,
@@ -807,6 +826,144 @@ fn run_extract(
             grouped(failed as u64)
         )
     };
+    report
+}
+
+fn run_pack(
+    request: &Request,
+    archive_name: &OsStr,
+    cancel: &AtomicBool,
+    send: impl Fn(ProgressUpdate),
+) -> Report {
+    let current = || !cancel.load(Ordering::Relaxed);
+    let names: Vec<OsString> = request.files.iter().map(|file| file.name.clone()).collect();
+    let mut packer = match archive::Packer::prepare(
+        &request.paths[0],
+        &request.paths[1],
+        archive_name,
+        &names,
+        current,
+    ) {
+        Ok(packer) => packer,
+        Err(error) => {
+            let state = if current() {
+                ItemState::NotStarted
+            } else {
+                ItemState::Canceled
+            };
+            return Report::stopped(request.files.len(), state, error.to_string());
+        }
+    };
+    let mut report = Report::stopped(request.files.len(), ItemState::NotStarted, String::new());
+    report.failed = false;
+    let total = packer.total;
+    let mut bytes = 0_u128;
+    let mut complete = 0;
+    let mut last = Instant::now();
+    let mut changed = Vec::new();
+    send(ProgressUpdate {
+        summary: Progress {
+            complete,
+            percent: Some(0),
+        },
+        items: Vec::new(),
+    });
+    for index in 0..request.files.len() {
+        if !current() {
+            report.aborted = true;
+            break;
+        }
+        let result = packer.item(index, current, |count| {
+            bytes += count as u128;
+            if last.elapsed() >= Duration::from_millis(100) {
+                let percent = (total > 0).then(|| (bytes * 100 / total).min(99) as u32);
+                send(ProgressUpdate {
+                    summary: Progress { complete, percent },
+                    items: std::mem::take(&mut changed),
+                });
+                last = Instant::now();
+            }
+        });
+        let (state, detail) = match result {
+            Ok(()) => {
+                complete += 1;
+                (ItemState::Packed, None)
+            }
+            Err(error) if !current() || error.kind() == io::ErrorKind::Interrupted => {
+                report.aborted = true;
+                (
+                    ItemState::Canceled,
+                    Some("Packing stopped before publishing the archive.".into()),
+                )
+            }
+            Err(error) => {
+                report.failed = true;
+                (ItemState::Failed, Some(error.to_string()))
+            }
+        };
+        report.items[index] = ItemReport {
+            state,
+            detail,
+            retry_identity: None,
+        };
+        changed.push((index, state));
+        if last.elapsed() >= Duration::from_millis(100) || index + 1 == request.files.len() {
+            let percent = (total > 0).then(|| (bytes * 100 / total).min(99) as u32);
+            send(ProgressUpdate {
+                summary: Progress { complete, percent },
+                items: std::mem::take(&mut changed),
+            });
+            last = Instant::now();
+        }
+        if report.aborted || report.failed {
+            break;
+        }
+    }
+    if !report.aborted && !report.failed {
+        match packer.finish(current) {
+            Ok(()) => {
+                report.completed = complete;
+                report.note = format!(
+                    "Created {} · {} packed",
+                    archive_name.to_string_lossy(),
+                    grouped(complete as u64)
+                );
+            }
+            Err(error) => {
+                let canceled_now = !current() || error.kind() == io::ErrorKind::Interrupted;
+                report.aborted = canceled_now;
+                report.failed = !canceled_now;
+                for item in &mut report.items {
+                    if item.state == ItemState::Packed {
+                        item.state = if canceled_now {
+                            ItemState::Canceled
+                        } else {
+                            ItemState::Failed
+                        };
+                        item.detail = Some(error.to_string());
+                    }
+                }
+                report.completed = 0;
+                report.note = error.to_string();
+            }
+        }
+    } else {
+        for item in &mut report.items {
+            if item.state == ItemState::Packed {
+                item.state = if report.aborted {
+                    ItemState::Canceled
+                } else {
+                    ItemState::NotStarted
+                };
+            }
+        }
+        report.completed = 0;
+        report.note = if report.aborted {
+            "Packing canceled · no archive was created".into()
+        } else {
+            "Packing failed · no archive was created".into()
+        };
+    }
     report
 }
 
@@ -1010,7 +1167,9 @@ fn register(
         match request.action {
             Transfer::Copy => operation.CopyItem(&shell_item, folder, name, None),
             Transfer::Move => operation.MoveItem(&shell_item, folder, name, None),
-            Transfer::Extract => unreachable!("ZIP extraction uses the archive worker"),
+            Transfer::Extract | Transfer::Pack => {
+                unreachable!("ZIP transfers use the archive worker")
+            }
         }
     }
 }

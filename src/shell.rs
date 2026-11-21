@@ -33,6 +33,7 @@ pub enum Transfer {
     Copy,
     Move,
     Extract,
+    Pack,
 }
 
 impl Transfer {
@@ -41,6 +42,7 @@ impl Transfer {
             Self::Copy => "Copy",
             Self::Move => "Move",
             Self::Extract => "Extract",
+            Self::Pack => "Pack",
         }
     }
 }

@@ -86,6 +86,7 @@ const CLIP_COPY: u16 = 120;
 const CLIP_PASTE: u16 = 127;
 const OP_HISTORY: u16 = 128;
 const SHOW_HIDDEN: u16 = 129;
+const PACK_ZIP: u16 = 130;
 const LEFT_UP: u16 = 121;
 const RIGHT_UP: u16 = 122;
 const LEFT_CLEAR: u16 = 125;
@@ -695,6 +696,7 @@ impl App {
             )?;
             menu_label(menu, FIND_FILES, w!("&Find files…\tAlt+F7"))?;
             menu_label(menu, QUICK_VIEW, w!("&Quick View…\tF3"))?;
+            menu_label(menu, PACK_ZIP, w!("Pack to &ZIP…\tAlt+F5"))?;
             menu_label(menu, BATCH_RENAME, w!("&Batch Rename…\tCtrl+M"))?;
             menu_label(menu, COMPARE, w!("Compare &folders…\tCtrl+Shift+C"))?;
             menu_label(menu, TRANSFERS, w!("&Transfers\tCtrl+J"))?;
@@ -1697,6 +1699,7 @@ impl App {
             COMPARE => self.compare_folders(),
             FIND_FILES => self.show_find_files(),
             QUICK_VIEW => self.show_quick_view(),
+            PACK_ZIP => self.pack_selection(),
             BATCH_RENAME => self.show_batch_rename(),
             CLIP_CUT => self.publish_files(true),
             CLIP_COPY => self.publish_files(false),
@@ -1756,6 +1759,10 @@ impl App {
             enable(context_menu::OPEN_TERMINAL, disk_ready);
             enable(context_menu::OPEN_EXPLORER, disk_ready);
             enable(context_menu::PROPERTIES, disk_ready && selected <= 1);
+            enable(
+                PACK_ZIP,
+                disk_ready && selected > 0 && self.can_queue_transfer(),
+            );
             let hidden_flag = if self.show_hidden.get() {
                 MF_CHECKED
             } else {
@@ -2013,6 +2020,7 @@ impl App {
             VK_V if !shift => self.view_menu(),
             VK_LEFT if !shift => self.history(self.active.get(), false),
             VK_RIGHT if !shift => self.history(self.active.get(), true),
+            VK_F5 if !shift => self.pack_selection(),
             VK_F7 if !shift => self.show_find_files(),
             VK_T if !shift => self.open_in_terminal(),
             VK_C if shift => self.copy_selected_paths(),

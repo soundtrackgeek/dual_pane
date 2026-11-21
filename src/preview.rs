@@ -50,19 +50,76 @@ pub fn load(path: &Path, current: impl Fn() -> bool) -> Option<Preview> {
     )
 }
 
-fn read_preview(path: &Path, current: &impl Fn() -> bool) -> io::Result<Preview> {
-    let mut file = File::open(path)?;
-    let mut bytes = Vec::new();
-    read_to(&mut file, &mut bytes, TEXT_LIMIT + 1, current)?;
-    let decoder = match bytes.as_slice() {
+pub fn load_archive(archive: &Path, member: &str, current: impl Fn() -> bool) -> Option<Preview> {
+    if !current() {
+        return None;
+    }
+    let result = read_archive_preview(archive, member, &current);
+    if !current() {
+        return None;
+    }
+    Some(
+        result
+            .unwrap_or_else(|error| Preview::Details(format!("Could not read preview · {error}"))),
+    )
+}
+
+fn image_codec(bytes: &[u8]) -> Option<&'static GUID> {
+    match bytes {
         [0xff, 0xd8, 0xff, ..] => Some(&CLSID_WICJpegDecoder),
         bytes if bytes.starts_with(b"\x89PNG\r\n\x1a\n") => Some(&CLSID_WICPngDecoder),
         bytes if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") => {
             Some(&CLSID_WICGifDecoder)
         }
         _ => None,
-    };
-    if let Some(codec) = decoder {
+    }
+}
+
+fn read_archive_preview(
+    archive: &Path,
+    member: &str,
+    current: &impl Fn() -> bool,
+) -> io::Result<Preview> {
+    let (mut bytes, size) = crate::archive::read_member(archive, member, TEXT_LIMIT + 1, current)?;
+    if let Some(codec) = image_codec(&bytes) {
+        if size > IMAGE_LIMIT as u64 {
+            return Ok(Preview::Details(
+                "Image exceeds the 24 MiB preview limit.".into(),
+            ));
+        }
+        if (bytes.len() as u64) < size {
+            let (full, _) = crate::archive::read_member(archive, member, IMAGE_LIMIT + 1, current)?;
+            bytes = full;
+        }
+        if bytes.len() > IMAGE_LIMIT {
+            return Ok(Preview::Details(
+                "Image exceeds the 24 MiB preview limit.".into(),
+            ));
+        }
+        if !current() {
+            return Ok(Preview::Details(String::new()));
+        }
+        return Ok(match image(&bytes, codec) {
+            Ok(Some(image)) => Preview::Image(image),
+            Ok(None) => Preview::Details("Image dimensions exceed the preview limit.".into()),
+            Err(error) => Preview::Details(format!("Could not decode image · {}", error.message())),
+        });
+    }
+    let excerpt = bytes.len() > TEXT_LIMIT;
+    bytes.truncate(TEXT_LIMIT);
+    Ok(match text(&bytes, excerpt) {
+        Some(content) => Preview::Text { content, excerpt },
+        None => Preview::Details(
+            "Extract this ZIP member with F5 to view it in its associated app.".into(),
+        ),
+    })
+}
+
+fn read_preview(path: &Path, current: &impl Fn() -> bool) -> io::Result<Preview> {
+    let mut file = File::open(path)?;
+    let mut bytes = Vec::new();
+    read_to(&mut file, &mut bytes, TEXT_LIMIT + 1, current)?;
+    if let Some(codec) = image_codec(&bytes) {
         if file.metadata()?.len() > IMAGE_LIMIT as u64 {
             return Ok(Preview::Details(
                 "Image exceeds the 24 MiB preview limit.".into(),
