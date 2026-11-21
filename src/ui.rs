@@ -44,6 +44,7 @@ use crate::{
 mod archives;
 mod batch_rename;
 mod comparison;
+mod context_menu;
 mod drives;
 mod file_interop;
 mod file_menu;
@@ -699,6 +700,23 @@ impl App {
             menu_label(menu, CLIP_CUT, w!("Cu&t files\tCtrl+X"))?;
             menu_label(menu, CLIP_COPY, w!("Cop&y files\tCtrl+C"))?;
             menu_label(menu, CLIP_PASTE, w!("&Paste files\tCtrl+V"))?;
+            AppendMenuW(menu, MF_SEPARATOR, 0, None)?;
+            menu_label(
+                menu,
+                context_menu::COPY_PATH,
+                w!("Copy pat&h(s)\tShift+Alt+C"),
+            )?;
+            menu_label(
+                menu,
+                context_menu::OPEN_TERMINAL,
+                w!("Open in &Terminal\tAlt+T"),
+            )?;
+            menu_label(
+                menu,
+                context_menu::OPEN_EXPLORER,
+                w!("Open in File &Explorer"),
+            )?;
+            menu_label(menu, context_menu::PROPERTIES, w!("Pr&operties\tAlt+Enter"))?;
             AppendMenuW(menu, MF_SEPARATOR, 0, None)?;
             menu_label(menu, SORT_NAME, w!("Sort by &name\tCtrl+1"))?;
             menu_label(menu, SORT_SIZE, w!("Sort by si&ze\tCtrl+2"))?;
@@ -1647,7 +1665,7 @@ impl App {
     }
 
     fn command(&self, command: u16) {
-        if self.drive_button_command(command) {
+        if self.drive_button_command(command) || self.context_menu_command(command) {
             return;
         }
         match command {
@@ -1704,8 +1722,22 @@ impl App {
 
     fn view_menu(&self) {
         let mut button = RECT::default();
-        let sort = self.panes[self.active.get()].listing.borrow().sort;
+        let active = self.active.get();
+        let pane = &self.panes[active];
+        let (sort, ready, disk_ready) = {
+            let listing = pane.listing.borrow();
+            (listing.sort, listing.ready(), listing.disk_ready())
+        };
+        let selected = pane.count();
         unsafe {
+            let enable = |id: u16, enabled: bool| {
+                let flags = MF_BYCOMMAND | if enabled { MF_ENABLED } else { MF_GRAYED };
+                let _ = EnableMenuItem(self.menu, u32::from(id), flags);
+            };
+            enable(context_menu::COPY_PATH, ready);
+            enable(context_menu::OPEN_TERMINAL, disk_ready);
+            enable(context_menu::OPEN_EXPLORER, disk_ready);
+            enable(context_menu::PROPERTIES, disk_ready && selected <= 1);
             let _ = CheckMenuRadioItem(
                 self.menu,
                 SORT_NAME as u32,
@@ -1924,11 +1956,26 @@ impl App {
     }
 
     fn alt_key(&self, key: VIRTUAL_KEY) -> bool {
+        let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+        let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+        if ctrl {
+            return false;
+        }
         match key {
-            VK_V => self.view_menu(),
-            VK_LEFT => self.history(self.active.get(), false),
-            VK_RIGHT => self.history(self.active.get(), true),
-            VK_F7 => self.show_find_files(),
+            VK_V if !shift => self.view_menu(),
+            VK_LEFT if !shift => self.history(self.active.get(), false),
+            VK_RIGHT if !shift => self.history(self.active.get(), true),
+            VK_F7 if !shift => self.show_find_files(),
+            VK_T if !shift => self.open_in_terminal(),
+            VK_C if shift => self.copy_selected_paths(),
+            VK_RETURN if !shift => {
+                let pane = &self.panes[self.active.get()];
+                if unsafe { GetFocus() } == pane.list {
+                    self.show_properties();
+                } else {
+                    return false;
+                }
+            }
             _ => return false,
         }
         true
@@ -2097,6 +2144,9 @@ unsafe extern "system" fn window_proc(
                     return LRESULT(0);
                 }
                 WM_NOTIFY => return app.notify(lparam),
+                WM_CONTEXTMENU if app.show_list_context_menu(HWND(wparam.0 as _), lparam) => {
+                    return LRESULT(0);
+                }
                 WM_CLIPBOARDUPDATE => {
                     app.clipboard_changed();
                     return LRESULT(0);

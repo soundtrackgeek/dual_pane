@@ -9,13 +9,15 @@ use windows::{
         Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
         System::Com::{
             CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
-            CoUninitialize,
+            CoTaskMemFree, CoUninitialize,
         },
         UI::Shell::{
             FOF_WANTNUKEWARNING, FOFX_ADDUNDORECORD, FOFX_RECYCLEONDELETE, FileOperation,
-            IFileOperation, IShellItem, SHCreateItemFromParsingName, SHFILEINFOW, SHGFI_SMALLICON,
-            SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGSI_SYSICONINDEX, SHGetFileInfoW,
-            SHGetStockIconInfo, SHSTOCKICONINFO, SIID_DOCNOASSOC, SIID_FOLDER, ShellExecuteW,
+            IFileOperation, IShellItem, SEE_MASK_INVOKEIDLIST, SHCreateItemFromParsingName,
+            SHELLEXECUTEINFOW, SHFILEINFOW, SHGFI_SMALLICON, SHGFI_SYSICONINDEX,
+            SHGFI_USEFILEATTRIBUTES, SHGSI_SYSICONINDEX, SHGetFileInfoW, SHGetStockIconInfo,
+            SHOpenFolderAndSelectItems, SHParseDisplayName, SHSTOCKICONINFO, SIID_DOCNOASSOC,
+            SIID_FOLDER, ShellExecuteExW, ShellExecuteW,
         },
         UI::WindowsAndMessaging::SW_SHOWNORMAL,
     },
@@ -128,7 +130,87 @@ pub fn open(owner: HWND, path: &Path) -> Result<()> {
             SW_SHOWNORMAL,
         )
     };
-    let code = result.0 as isize;
+    shell_execute_result(result.0 as isize, "Windows could not open this file.")
+}
+
+pub fn properties(owner: HWND, path: &Path) -> Result<()> {
+    let path = wide(path);
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_INVOKEIDLIST,
+        hwnd: owner,
+        lpVerb: w!("properties"),
+        lpFile: PCWSTR(path.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    unsafe { ShellExecuteExW(&mut info) }
+}
+
+pub fn open_in_explorer(owner: HWND, path: &Path, select: bool) -> Result<()> {
+    if !select {
+        let target = wide(path);
+        let result = unsafe {
+            ShellExecuteW(
+                Some(owner),
+                w!("explore"),
+                PCWSTR(target.as_ptr()),
+                None,
+                None,
+                SW_SHOWNORMAL,
+            )
+        };
+        return shell_execute_result(
+            result.0 as isize,
+            "Windows could not open this folder in File Explorer.",
+        );
+    }
+    let wide_path = wide(path);
+    let mut pidl = std::ptr::null_mut();
+    unsafe {
+        SHParseDisplayName(PCWSTR(wide_path.as_ptr()), None, &mut pidl, 0, None)?;
+        let result = SHOpenFolderAndSelectItems(pidl, None, 0);
+        CoTaskMemFree(Some(pidl.cast()));
+        result
+    }
+}
+
+pub fn open_terminal(owner: HWND, directory: &Path) -> Result<()> {
+    let dir = wide(directory);
+    let candidates: [(PCWSTR, Option<PCWSTR>); 4] = [
+        (w!("wt.exe"), Some(w!("-d ."))),
+        (w!("pwsh.exe"), None),
+        (w!("powershell.exe"), None),
+        (w!("cmd.exe"), None),
+    ];
+    let mut last_code = 0;
+    for (program, parameters) in candidates {
+        let result = unsafe {
+            ShellExecuteW(
+                Some(owner),
+                w!("open"),
+                program,
+                parameters.unwrap_or(PCWSTR::null()),
+                PCWSTR(dir.as_ptr()),
+                SW_SHOWNORMAL,
+            )
+        };
+        let code = result.0 as isize;
+        if code > 32 {
+            return Ok(());
+        }
+        last_code = code;
+        if code != 2 && code != 3 {
+            break;
+        }
+    }
+    shell_execute_result(
+        last_code,
+        "Windows could not open a terminal in this folder.",
+    )
+}
+
+fn shell_execute_result(code: isize, fallback: &str) -> Result<()> {
     if code > 32 {
         Ok(())
     } else {
@@ -137,7 +219,7 @@ pub fn open(owner: HWND, path: &Path) -> Result<()> {
             3 => "The path was not found.",
             5 => "Access was denied.",
             31 => "No app is associated with this file type.",
-            _ => "Windows could not open this file.",
+            _ => fallback,
         };
         Err(windows::core::Error::new(
             windows::Win32::Foundation::E_FAIL,

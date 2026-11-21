@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.7] - 2026-11-21
+
+### Added
+
+- Added a right-click and keyboard (`Shift+F10` / Menu key) context menu for file lists, with item, folder-background, and ZIP archive actions.
+- Added everyday Windows shell actions from both the context menu and View menu: **Copy path(s)** (`Shift+Alt+C`), **Open in Terminal** (`Alt+T`, preferring Windows Terminal with PowerShell/cmd fallback), **Open in File Explorer** (selecting the focused item), and **Properties** (`Alt+Enter`).
+
 ## [1.0.0-rc.6] - 2026-11-18
 
 ### Fixed

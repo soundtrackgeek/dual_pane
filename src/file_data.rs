@@ -254,6 +254,36 @@ pub fn clipboard_write(window: HWND, paths: &[PathBuf], cut: bool) -> Result<u32
     Ok(unsafe { GetClipboardSequenceNumber() })
 }
 
+pub fn format_paths_text(paths: &[PathBuf]) -> OsString {
+    let mut out = OsString::new();
+    for (index, path) in paths.iter().enumerate() {
+        if index > 0 {
+            out.push("\r\n");
+        }
+        out.push(path.as_os_str());
+    }
+    out
+}
+
+pub fn clipboard_write_text(window: HWND, text: &std::ffi::OsStr) -> Result<u32> {
+    let units: Vec<u16> = text.encode_wide().chain(std::iter::once(0)).collect();
+    let byte_len = units.len().saturating_mul(2);
+    if byte_len > MAX_BYTES {
+        return Err(Error::new(
+            E_INVALIDARG,
+            "The path text exceeds the clipboard size limit.",
+        ));
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(units.as_ptr().cast::<u8>(), byte_len) };
+    let memory = Memory::new(bytes)?;
+    let clipboard = Clipboard::open(window)?;
+    unsafe {
+        EmptyClipboard()?;
+    }
+    clipboard.put(CF_UNICODETEXT.0.into(), memory)?;
+    Ok(unsafe { GetClipboardSequenceNumber() })
+}
+
 pub fn clipboard_read(window: HWND) -> Result<(Vec<PathBuf>, bool, u32)> {
     let _clipboard = Clipboard::open(window)?;
     let paths = unsafe { GetClipboardData(CF_HDROP.0.into()) }.map_err(|_| {
