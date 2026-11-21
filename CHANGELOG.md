@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.8] - 2026-11-21
+
+### Changed
+
+- Right-clicking a file or folder now toggles its selection, and holding and dragging the right mouse button across rows selects or deselects them continuously.
+- Holding the right mouse button in place for 2 seconds opens the item or folder context menu (and preserves selection if held on an already-selected item); `Shift+F10` and the Menu key still open it immediately.
+
 ## [1.0.0-rc.7] - 2026-11-21
 
 ### Added

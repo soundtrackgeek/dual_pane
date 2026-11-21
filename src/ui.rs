@@ -254,6 +254,7 @@ struct App {
     layout: Cell<Layout>,
     split: Cell<f32>,
     dragging: Cell<bool>,
+    right_drag: Cell<Option<context_menu::RightDrag>>,
     changing_rows: Cell<bool>,
     icons: Option<Icons>,
     operation_active: Cell<bool>,
@@ -760,6 +761,7 @@ impl App {
             layout: Cell::new(Layout::default()),
             split: Cell::new(workspace.split),
             dragging: Cell::new(false),
+            right_drag: Cell::new(None),
             changing_rows: Cell::new(false),
             icons,
             operation_active: Cell::new(false),
@@ -2116,6 +2118,32 @@ unsafe extern "system" fn control_proc(
                     return app.draw_header(window, &*(lparam.0 as *const NMCUSTOMDRAW));
                 }
             }
+            WM_RBUTTONDOWN | WM_RBUTTONDBLCLK => {
+                if let Some(app) = app()
+                    && app.right_button_down(window, point(lparam))
+                {
+                    return LRESULT(0);
+                }
+            }
+            WM_MOUSEMOVE => {
+                if let Some(app) = app()
+                    && app.right_mouse_move(window, point(lparam))
+                {
+                    return LRESULT(0);
+                }
+            }
+            WM_RBUTTONUP => {
+                if let Some(app) = app()
+                    && app.right_button_up(window)
+                {
+                    return LRESULT(0);
+                }
+            }
+            WM_CAPTURECHANGED | WM_CANCELMODE => {
+                if let Some(app) = app() {
+                    app.cancel_right_drag(window);
+                }
+            }
             WM_NCDESTROY => {
                 let _ = RemoveWindowSubclass(window, Some(control_proc), id);
             }
@@ -2222,6 +2250,10 @@ unsafe extern "system" fn window_proc(
                 }
                 WM_TIMER if (REFRESH_TIMER..REFRESH_TIMER + 2).contains(&wparam.0) => {
                     app.scan_dirty_folder(wparam.0 - REFRESH_TIMER);
+                    return LRESULT(0);
+                }
+                WM_TIMER if wparam.0 == context_menu::RIGHT_HOLD_TIMER => {
+                    app.right_hold_fired();
                     return LRESULT(0);
                 }
                 WM_THEMECHANGED | WM_SETTINGCHANGE | WM_SYSCOLORCHANGE => app.apply_theme(),

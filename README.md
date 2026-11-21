@@ -70,10 +70,10 @@ Click a drive button above a pane’s path field to open that drive’s root in 
 | Shift+Alt+C | Copy the full path(s) of the selected items or active folder to the clipboard |
 | Alt+T | Open a terminal in the active folder (or the single selected folder) |
 | Alt+Enter | Open Windows Properties for the selected item or active folder |
-| Shift+F10 / Right-click | Open the item or folder context menu in a file list |
+| Shift+F10 / Hold right-click (2s) | Open the item or folder context menu in a file list |
 | Alt+V | Open the View menu |
 
-You can double-click a row to open it, right-click or press **Shift+F10** / the Menu key for the context menu (including **Open in File Explorer**, **Open in Terminal**, **Copy path**, and **Properties**), use Ctrl or Shift to select multiple rows, and drag the divider to resize the panes. The active pane is marked above its path field. The View menu offers System, Light, and Dark themes.
+You can double-click a row to open it, right-click to toggle selection or hold and drag with the right mouse button to select multiple rows, hold right-click for 2 seconds (or press **Shift+F10** / the Menu key) for the context menu (including **Open in File Explorer**, **Open in Terminal**, **Copy path**, and **Properties**), use Ctrl or Shift to select multiple rows, and drag the divider to resize the panes. The active pane is marked above its path field. The View menu offers System, Light, and Dark themes.
 
 Each tab remembers its folder, sort, filter, scroll position, and focused item. A single selected item is restored when it is still visible. Reopening a tab reloads its folder. Each pane keeps at least one tab, supports up to 32 tabs, and keeps Back/Forward history for the current session.
 
