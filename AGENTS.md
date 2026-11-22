@@ -17,3 +17,6 @@
    - Use `git add` to stage all modified files (README.md, CHANGELOG.md, and code files)
    - Create descriptive commit message following existing style
    - Push to remote repository with `git push`
+
+4. **Clean build artifacts**:
+   - Run `cargo clean` after verifying tests/builds and pushing so `target/` (debug symbols, incremental cache, and test binaries) does not accumulate gigabytes on disk.
